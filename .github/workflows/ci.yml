@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  python:
+    name: Python compile + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile all service code
+        run: |
+          python -m py_compile \
+            localllm/main.py localllm/cache_utils.py \
+            meta-orchestrator/main.py \
+            model-manager/main.py \
+            orchestration-service/main.py \
+            vector-db-service/main.py \
+            web-search-service/main.py \
+            multimodal-agent/main.py \
+            langchain-agent/main.py \
+            reflection-agent/reflection_agent/main.py \
+            model-improvement-service/main.py \
+            model-improvement-service/model_version_detector.py \
+            $(ls */internal_auth.py)
+
+      - name: Install test deps
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Run unit tests
+        run: pytest -q tests/
+
+  compose:
+    name: docker compose config validates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose
+        env:
+          REDIS_PASSWORD: ci-dummy
+          LOCALLLM_API_KEY: ci-dummy
+          INTERNAL_API_KEY: ci-dummy
+        run: docker compose -f docker-compose-simplified.yml config >/dev/null
+
+  ui:
+    name: UI build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm install
+          npm run build
