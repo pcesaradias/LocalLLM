@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -30,10 +31,15 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(title="Enhanced Local LLM", version="1.0.0")
 
-# Add CORS middleware
+# Add CORS middleware. Origins are read from ALLOWED_ORIGINS (comma-separated).
+# Wildcard "*" cannot be combined with credentials, so credentials are only
+# enabled when an explicit origin allowlist is configured.
+_allowed_origins = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins or ["http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,6 +49,7 @@ app.add_middleware(
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "redis"),
     port=int(os.getenv("REDIS_PORT", "6379")),
+    password=os.getenv("REDIS_PASSWORD") or None,
     decode_responses=True
 )
 
@@ -91,7 +98,7 @@ class ReflectResponse(BaseModel):
     analysis: Dict[str, Any]
     confidence: float
     suggestions: List[str]
-    improved_response: str = None
+    improved_response: Optional[str] = None
 
 # RAG (Retrieval Augmented Generation) helper functions
 async def retrieve_context(query: str, collection: str = "knowledge_base", top_k: int = 3) -> List[Dict[str, Any]]:
@@ -173,11 +180,21 @@ class EnhancedLLMService:
         """Enhanced chat with reflection and reasoning"""
         start_time = time.time()
 
+        # Parameters that change the generated answer must be part of the cache
+        # key, otherwise a RAG request can return a non-RAG cached answer.
+        cache_context = {
+            "use_rag": request.use_rag,
+            "rag_collection": request.rag_collection,
+            "rag_top_k": request.rag_top_k,
+            "max_tokens": request.max_tokens,
+        }
+
         # Check intelligent cache first
         cached = self.cache_manager.get_cached_response(
             prompt=request.message,
             model=request.model,
-            temperature=request.temperature
+            temperature=request.temperature,
+            additional_context=cache_context
         )
         if cached:
             return ChatResponse(
@@ -272,7 +289,8 @@ class EnhancedLLMService:
                     model=request.model,
                     response=enhanced_response,
                     processing_time=processing_time,
-                    temperature=request.temperature
+                    temperature=request.temperature,
+                    additional_context=cache_context
                 )
 
                 return ChatResponse(
@@ -491,7 +509,7 @@ def generate_api_key():
     api_key = os.getenv("LOCALLLM_API_KEY")
     if not api_key:
         api_key = secrets.token_urlsafe(32)
-        logger.info(f"Generated new API key: {api_key}")
+        logger.info("Generated new API key (hash prefix: %s)", hashlib.sha256(api_key.encode()).hexdigest()[:8])
         # Store in Redis for persistence
         redis_client.set("localllm:api_key", api_key)
     return api_key
@@ -503,7 +521,7 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
         # Generate initial key
         stored_key = generate_api_key()
     
-    if credentials.credentials != stored_key:
+    if not secrets.compare_digest(credentials.credentials, stored_key):
         raise HTTPException(
             status_code=401,
             detail="Invalid API key",
@@ -684,29 +702,21 @@ llm_service = EnhancedLLMService()
 async def root():
     return {"message": "Enhanced Local LLM Service", "version": "1.0.0"}
 
-@app.get("/admin/generate-key")
-async def generate_key_endpoint():
-    """Generate a new API key (admin only - no auth required for initial setup)"""
-    new_key = generate_api_key()
+@app.post("/admin/rotate-key")
+async def rotate_key_endpoint(api_key: str = Depends(verify_api_key)):
+    """Rotate the API key. Requires the current key. The bootstrap key is set
+    via the LOCALLLM_API_KEY environment variable, not via an open endpoint."""
+    new_key = secrets.token_urlsafe(32)
+    redis_client.set("localllm:api_key", new_key)
+    logger.info("API key rotated (hash prefix: %s)", hashlib.sha256(new_key.encode()).hexdigest()[:8])
     return {
-        "message": "New API key generated",
+        "message": "API key rotated",
         "api_key": new_key,
         "instructions": "Use this key in the Authorization header as: Bearer <api_key>"
     }
 
-@app.get("/admin/current-key")
-async def get_current_key():
-    """Get the current API key (admin only - no auth required for initial setup)"""
-    current_key = redis_client.get("localllm:api_key")
-    if not current_key:
-        current_key = generate_api_key()
-    return {
-        "current_api_key": current_key,
-        "instructions": "Use this key in the Authorization header as: Bearer <api_key>"
-    }
-
 @app.get("/admin/stats")
-async def get_stats():
+async def get_stats(api_key: str = Depends(verify_api_key)):
     """Get aggregated system statistics"""
     try:
         # Get request counts from Prometheus metrics
@@ -785,7 +795,7 @@ async def get_stats():
         }
 
 @app.get("/admin/analyze-session/{conversation_id}")
-async def analyze_session(conversation_id: str):
+async def analyze_session(conversation_id: str, api_key: str = Depends(verify_api_key)):
     """Analyze conversation session for improvement opportunities"""
     try:
         analysis = analyze_conversation_history(conversation_id)
@@ -795,7 +805,7 @@ async def analyze_session(conversation_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/admin/learning-insights")
-async def get_learning_insights():
+async def get_learning_insights(api_key: str = Depends(verify_api_key)):
     """Get aggregated learning insights and improvement patterns"""
     try:
         insights = {
@@ -866,7 +876,7 @@ async def get_learning_insights():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/models/pull")
-async def pull_model(model_name: str):
+async def pull_model(model_name: str, api_key: str = Depends(verify_api_key)):
     """Pull a model from Ollama library"""
     try:
         ollama_url = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
@@ -912,7 +922,7 @@ async def pull_model(model_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/admin/models/{model_name}")
-async def delete_model(model_name: str):
+async def delete_model(model_name: str, api_key: str = Depends(verify_api_key)):
     """Delete a model from Ollama"""
     try:
         ollama_url = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")

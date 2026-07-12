@@ -2,10 +2,10 @@ from fastapi import FastAPI, HTTPException
 import httpx
 import redis
 import json
+import os
 import asyncio
 from typing import Dict, List, Optional
 import logging
-import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -19,7 +19,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Redis client
-redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+redis_client = redis.Redis.from_url(
+    os.getenv("REDIS_URL", "redis://redis:6379"), decode_responses=True
+)
 
 # Model configurations with enhanced descriptions and reflection capabilities
 MODEL_CONFIGS = {
