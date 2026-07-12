@@ -5,10 +5,18 @@
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 [![Code Quality](https://img.shields.io/badge/code%20quality-A-brightgreen.svg)]()
 
-> **A production-ready, fully automated local LLM system with reflexion-based self-improvement, multi-profile LoRA fine-tuning, and enterprise microservices architecture.**
+> **A fully automated local LLM system with reflexion-based self-improvement, multi-profile LoRA fine-tuning, and a microservices architecture.**
 
-**Status:** Phase 19 Complete - Production Ready
-**Quality Evolution:** 7.5/10 → 8.9/10 (+19% improvement, 60% win rate vs commercial AI models)
+**Status:** Actively hardened toward production. A full review (security,
+architecture, code quality) landed a round of correctness, security, and
+deployment fixes on the `production-hardening` branch. Remaining
+production-readiness work — async I/O remediation, internal service auth, and an
+optional vLLM inference backend for concurrent serving — is tracked in
+[RECOMMENDATIONS.md](RECOMMENDATIONS.md). Suitable for single-node / small-team
+self-hosting today; review RECOMMENDATIONS.md before high-concurrency use.
+
+**Self-improvement results (author's evaluation):** quality 7.5/10 → 8.9/10 with
+a reported 60% win rate vs commercial models on the internal test set.
 
 ---
 
