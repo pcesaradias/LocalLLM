@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 import httpx
 import redis
 import json
@@ -8,6 +8,8 @@ from typing import Dict, List, Optional
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
+from internal_auth import require_internal_key, internal_headers
 
 app = FastAPI(title="Model Manager Service")
 
@@ -101,7 +103,7 @@ async def scheduled_auto_upgrade():
     try:
         # Check for available upgrades
         async with httpx.AsyncClient() as client:
-            response = await client.post("http://localhost:8005/models/auto-upgrade")
+            response = await client.post("http://localhost:8005/models/auto-upgrade", headers=internal_headers())
             if response.status_code == 200:
                 results = response.json()
                 upgrades_applied = sum(1 for result in results["auto_upgrade_results"].values() if result.get("status") == "upgraded")
@@ -144,7 +146,7 @@ async def health_check():
     return {"status": "healthy", "service": "model-manager"}
 
 @app.get("/models")
-async def get_models():
+async def get_models(_auth: bool = Depends(require_internal_key)):
     """Get all model configurations"""
     models = {}
     for model_type in MODEL_CONFIGS.keys():
@@ -154,7 +156,7 @@ async def get_models():
     return models
 
 @app.get("/models/{model_type}")
-async def get_model(model_type: str):
+async def get_model(model_type: str, _auth: bool = Depends(require_internal_key)):
     """Get specific model configuration"""
     model_data = redis_client.hgetall(f"model:{model_type}")
     if not model_data:
@@ -162,7 +164,7 @@ async def get_model(model_type: str):
     return model_data
 
 @app.post("/models/{model_type}/update")
-async def update_model(model_type: str, new_model: str):
+async def update_model(model_type: str, new_model: str, _auth: bool = Depends(require_internal_key)):
     """Update a model to a new version"""
     if model_type not in MODEL_CONFIGS:
         raise HTTPException(status_code=404, detail=f"Model type {model_type} not found")
@@ -204,7 +206,7 @@ async def update_model(model_type: str, new_model: str):
             raise HTTPException(status_code=500, detail=f"Error updating model: {str(e)}")
 
 @app.get("/models/{model_type}/check-updates")
-async def check_model_updates(model_type: str):
+async def check_model_updates(model_type: str, _auth: bool = Depends(require_internal_key)):
     """Check for model updates (placeholder for actual version checking)"""
     if model_type not in MODEL_CONFIGS:
         raise HTTPException(status_code=404, detail=f"Model type {model_type} not found")
@@ -224,7 +226,7 @@ async def check_model_updates(model_type: str):
     }
 
 @app.post("/models/refresh-all")
-async def refresh_all_models():
+async def refresh_all_models(_auth: bool = Depends(require_internal_key)):
     """Refresh all model configurations and check for updates"""
     results = {}
     
@@ -274,7 +276,7 @@ async def refresh_all_models():
     return {"refresh_results": results}
 
 @app.post("/models/auto-upgrade")
-async def auto_upgrade_models():
+async def auto_upgrade_models(_auth: bool = Depends(require_internal_key)):
     """Automatically upgrade all models to their planned upgrades when available"""
     upgrade_results = {}
     
@@ -323,7 +325,7 @@ async def auto_upgrade_models():
     return {"auto_upgrade_results": upgrade_results}
 
 @app.get("/recommend-model")
-async def recommend_model(task_type: str, context: str = ""):
+async def recommend_model(task_type: str, context: str = "", _auth: bool = Depends(require_internal_key)):
     """Recommend the best model for a given task type using enhanced descriptions and reflection"""
     # Enhanced model mapping with reflection capabilities
     model_mapping = {
@@ -469,7 +471,7 @@ def generate_reflection_analysis(best_model: dict, task_type: str, context: str,
     return analysis
 
 @app.get("/models/reflection/analyze-performance")
-async def analyze_model_performance(model_type: str, task_results: str = ""):
+async def analyze_model_performance(model_type: str, task_results: str = "", _auth: bool = Depends(require_internal_key)):
     """Analyze model performance and provide reflection for improvement"""
     model_data = redis_client.hgetall(f"model:{model_type}")
     if not model_data:

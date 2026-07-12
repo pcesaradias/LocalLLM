@@ -6,8 +6,10 @@ from error_handling import (
     service_unavailable_error, timeout_error, model_error, internal_error
 )
 from cline_utils import ClinePromptParser
+from internal_auth import internal_headers
 from typing import Dict, Any, List, Optional, TypedDict
 import requests
+import httpx
 import json
 import redis
 import os
@@ -24,6 +26,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Meta-Orchestrator Service", version="1.0.0")
+
+# Shared async HTTP client for non-blocking outbound calls to backend services
+_http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
 
 # Initialize Redis for learning and state management
 redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
@@ -334,9 +339,10 @@ class ModelManagerIntegration:
     async def get_recommended_model(self, task_type: str, context: str = "") -> Dict[str, Any]:
         """Get recommended model from model manager"""
         try:
-            response = requests.get(
+            response = await _http.get(
                 f"{self.model_manager_url}/recommend-model",
                 params={"task_type": task_type, "context": context},
+                headers=internal_headers(),
                 timeout=10
             )
             if response.status_code == 200:
@@ -387,9 +393,10 @@ class ModelManagerIntegration:
     async def analyze_model_performance(self, model_type: str, task_results: str = "") -> Dict[str, Any]:
         """Analyze model performance using reflection"""
         try:
-            response = requests.get(
+            response = await _http.get(
                 f"{self.model_manager_url}/models/reflection/analyze-performance",
                 params={"model_type": model_type, "task_results": task_results},
+                headers=internal_headers(),
                 timeout=10
             )
             if response.status_code == 200:
@@ -450,7 +457,7 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
                 },
                 "requirements": request.preferences or {}
             }
-            response = requests.post(
+            response = await _http.post(
                 f"{service_info['url']}/execute-workflow",
                 json=workflow_request,
                 timeout=300
@@ -470,8 +477,11 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
                 if not api_key:
                     raise HTTPException(status_code=500, detail="LOCALLLM_API_KEY not configured")
                 headers["Authorization"] = f"Bearer {api_key}"
+            else:
+                # Internal service-to-service auth for backend services
+                headers.update(internal_headers())
 
-            response = requests.post(
+            response = await _http.post(
                 f"{service_info['url']}/chat",
                 json=chat_request,
                 headers=headers,
@@ -540,7 +550,7 @@ async def _fallback_to_localllm(request: MetaRequest, session_id: str, start_tim
             raise HTTPException(status_code=500, detail="LOCALLLM_API_KEY not configured")
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        response = requests.post(
+        response = await _http.post(
             f"{SERVICES['localllm']['url']}/chat",
             json=chat_request,
             headers=headers,
@@ -732,7 +742,7 @@ async def health_check():
     services_healthy = {}
     for service_name, service_info in SERVICES.items():
         try:
-            response = requests.get(f"{service_info['url']}/health", timeout=5)
+            response = await _http.get(f"{service_info['url']}/health", timeout=5)
             services_healthy[service_name] = response.status_code == 200
         except:
             services_healthy[service_name] = False
@@ -743,6 +753,11 @@ async def health_check():
         "services": services_healthy,
         "learning_system": "active"
     }
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close the shared async HTTP client on shutdown"""
+    await _http.aclose()
 
 if __name__ == "__main__":
     import uvicorn

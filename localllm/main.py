@@ -20,6 +20,7 @@ import redis
 from prometheus_client import Counter, Histogram, generate_latest, REGISTRY
 from prometheus_client.core import CollectorRegistry
 import requests
+import httpx
 import sys
 sys.path.append("/app")
 from localllm.cache_utils import PromptCacheManager
@@ -52,6 +53,11 @@ redis_client = redis.Redis(
     password=os.getenv("REDIS_PASSWORD") or None,
     decode_responses=True
 )
+
+# Shared async HTTP client for all outbound calls made from async handlers.
+# Reused across requests to avoid blocking the event loop and to pool connections.
+# Long read timeout (LLM generation), short connect timeout to fail fast.
+_http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
 
 # Vector DB configuration
 VECTOR_DB_URL = os.getenv("VECTOR_DB_URL", "http://vector-db:8007")
@@ -104,7 +110,7 @@ class ReflectResponse(BaseModel):
 async def retrieve_context(query: str, collection: str = "knowledge_base", top_k: int = 3) -> List[Dict[str, Any]]:
     """Retrieve relevant context from vector database"""
     try:
-        response = requests.post(
+        response = await _http.post(
             f"{VECTOR_DB_URL}/search",
             json={
                 "query": query,
@@ -235,7 +241,7 @@ class EnhancedLLMService:
                 }
             }
             
-            response = requests.post(f"{ollama_url}/api/generate", json=ollama_request)
+            response = await _http.post(f"{ollama_url}/api/generate", json=ollama_request)
             if response.status_code == 200:
                 data = response.json()
 
@@ -321,39 +327,38 @@ class EnhancedLLMService:
             }
 
             # Make streaming request to Ollama
-            response = requests.post(
+            async with _http.stream(
+                "POST",
                 f"{ollama_url}/api/generate",
                 json=ollama_request,
-                stream=True,
                 timeout=120
-            )
+            ) as response:
+                if response.status_code == 200:
+                    full_response = ""
+                    async for line in response.aiter_lines():
+                        if line:
+                            try:
+                                chunk = json.loads(line)
+                                if "response" in chunk:
+                                    token = chunk["response"]
+                                    full_response += token
+                                    # Send SSE formatted data
+                                    yield f"data: {json.dumps({'token': token, 'done': chunk.get('done', False)})}\n\n"
 
-            if response.status_code == 200:
-                full_response = ""
-                for line in response.iter_lines():
-                    if line:
-                        try:
-                            chunk = json.loads(line)
-                            if "response" in chunk:
-                                token = chunk["response"]
-                                full_response += token
-                                # Send SSE formatted data
-                                yield f"data: {json.dumps({'token': token, 'done': chunk.get('done', False)})}\n\n"
-
-                            if chunk.get("done", False):
-                                # Store conversation history if conversation_id is provided
-                                if request.conversation_id:
-                                    store_conversation_turn(
-                                        conversation_id=request.conversation_id,
-                                        user_message=request.message,
-                                        ai_response=full_response,
-                                        model=request.model
-                                    )
-                                break
-                        except json.JSONDecodeError:
-                            continue
-            else:
-                yield f"data: {json.dumps({'error': 'Failed to generate response', 'done': True})}\n\n"
+                                if chunk.get("done", False):
+                                    # Store conversation history if conversation_id is provided
+                                    if request.conversation_id:
+                                        store_conversation_turn(
+                                            conversation_id=request.conversation_id,
+                                            user_message=request.message,
+                                            ai_response=full_response,
+                                            model=request.model
+                                        )
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                else:
+                    yield f"data: {json.dumps({'error': 'Failed to generate response', 'done': True})}\n\n"
 
         except Exception as e:
             logger.error(f"Stream error: {e}")
@@ -401,7 +406,7 @@ Generate ONLY the verification questions, one per line, numbered 1-3. Be concise
                 "options": {"temperature": 0.3}
             }
 
-            verify_resp = requests.post(f"{ollama_url}/api/generate", json=verify_request, timeout=30)
+            verify_resp = await _http.post(f"{ollama_url}/api/generate", json=verify_request, timeout=30)
             verification_questions = verify_resp.json().get("response", "").strip() if verify_resp.status_code == 200 else ""
 
             # Step 2: Multi-criteria quality scoring
@@ -425,7 +430,7 @@ Return ONLY 4 numbers separated by commas (e.g., "8,7,9,8")"""
                 "options": {"temperature": 0.1}
             }
 
-            score_resp = requests.post(f"{ollama_url}/api/generate", json=score_request, timeout=30)
+            score_resp = await _http.post(f"{ollama_url}/api/generate", json=score_request, timeout=30)
             scores_text = score_resp.json().get("response", "7,7,7,7").strip() if score_resp.status_code == 200 else "7,7,7,7"
 
             # Parse scores
@@ -473,7 +478,7 @@ Provide an IMPROVED response that addresses the verification questions and quali
                     "stream": False
                 }
 
-                improve_resp = requests.post(f"{ollama_url}/api/generate", json=improve_request, timeout=45)
+                improve_resp = await _http.post(f"{ollama_url}/api/generate", json=improve_request, timeout=45)
                 if improve_resp.status_code == 200:
                     improved_response = improve_resp.json()["response"]
                     reflection_metadata["improved"] = True
@@ -493,7 +498,9 @@ Provide an IMPROVED response that addresses the verification questions and quali
         """Check for model updates and download new versions"""
         try:
             # Get list of available models from Ollama library
-            response = requests.get("https://ollama.com/library")
+            # Runs in a background thread (not the event loop), so requests is kept;
+            # a timeout is added so a hung connection cannot stall the scheduler.
+            response = requests.get("https://ollama.com/library", timeout=30)
             if response.status_code == 200:
                 # This is a simplified check - in production you'd parse the actual model list
                 MODEL_UPDATE_COUNT.inc()
@@ -883,38 +890,39 @@ async def pull_model(model_name: str, api_key: str = Depends(verify_api_key)):
         logger.info(f"Pulling model {model_name} from Ollama at {ollama_url}")
 
         # Call Ollama API to pull the model
-        response = requests.post(
+        async with _http.stream(
+            "POST",
             f"{ollama_url}/api/pull",
             json={"name": model_name},
-            stream=True,
             timeout=600  # 10 minute timeout for model downloads
-        )
+        ) as response:
+            if response.status_code == 200:
+                # Stream the download progress
+                progress_data = []
+                async for line in response.aiter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            progress_data.append(data)
+                            if "status" in data:
+                                logger.info(f"Pull progress: {data['status']}")
+                        except json.JSONDecodeError:
+                            pass
 
-        if response.status_code == 200:
-            # Stream the download progress
-            progress_data = []
-            for line in response.iter_lines():
-                if line:
-                    try:
-                        data = json.loads(line)
-                        progress_data.append(data)
-                        if "status" in data:
-                            logger.info(f"Pull progress: {data['status']}")
-                    except json.JSONDecodeError:
-                        pass
+                logger.info(f"Successfully pulled model {model_name}")
+                return {
+                    "status": "success",
+                    "message": f"Model {model_name} pulled successfully",
+                    "model": model_name,
+                    "progress": progress_data[-1] if progress_data else {}
+                }
+            else:
+                # Body must be read before .text is available on a streaming response
+                await response.aread()
+                logger.error(f"Failed to pull model {model_name}: {response.text}")
+                raise HTTPException(status_code=response.status_code, detail=f"Failed to pull model: {response.text}")
 
-            logger.info(f"Successfully pulled model {model_name}")
-            return {
-                "status": "success",
-                "message": f"Model {model_name} pulled successfully",
-                "model": model_name,
-                "progress": progress_data[-1] if progress_data else {}
-            }
-        else:
-            logger.error(f"Failed to pull model {model_name}: {response.text}")
-            raise HTTPException(status_code=response.status_code, detail=f"Failed to pull model: {response.text}")
-
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         logger.error(f"Timeout pulling model {model_name}")
         raise HTTPException(status_code=504, detail="Model pull timeout - download may still be in progress")
     except Exception as e:
@@ -929,7 +937,9 @@ async def delete_model(model_name: str, api_key: str = Depends(verify_api_key)):
         logger.info(f"Deleting model {model_name} from Ollama at {ollama_url}")
 
         # Call Ollama API to delete the model
-        response = requests.delete(
+        # httpx's .delete() has no json= param, so .request() is used for a body.
+        response = await _http.request(
+            "DELETE",
             f"{ollama_url}/api/delete",
             json={"name": model_name},
             timeout=30
@@ -1038,7 +1048,7 @@ Respond in JSON format:
     try:
         # Call Ollama for analysis
         ollama_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-        response = requests.post(
+        response = await _http.post(
             f"{ollama_url}/api/generate",
             json={
                 "model": request.model,
@@ -1138,6 +1148,11 @@ async def list_models(api_key: str = Depends(verify_api_key)):
 @app.get("/metrics")
 async def metrics():
     return generate_latest(REGISTRY)
+
+@app.on_event("shutdown")
+async def _shutdown_http_client():
+    """Close the shared async HTTP client so in-flight connections drain cleanly."""
+    await _http.aclose()
 
 # Background tasks
 def schedule_model_updates():

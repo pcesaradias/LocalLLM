@@ -9,17 +9,20 @@ Automatic model improvement service that integrates with the orchestrator:
 5. Reports improvement metrics to orchestrator
 """
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import logging
 import os
 import asyncio
+import httpx
 import redis
 import json
 from datetime import datetime
 
 from model_version_detector import ModelVersionDetector
+from internal_auth import require_internal_key, internal_headers
 
 try:
     from automatic_tester import AutomaticTester
@@ -47,6 +50,9 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 META_ORCHESTRATOR_URL = os.getenv("META_ORCHESTRATOR_URL", "http://localhost:8004")
 MODEL_MANAGER_URL = os.getenv("MODEL_MANAGER_URL", "http://localhost:8005")
+
+# Shared async HTTP client for outbound calls to internal services
+_http = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0))
 
 # Initialize components
 detector = ModelVersionDetector(ollama_url=OLLAMA_URL)
@@ -102,14 +108,14 @@ async def health_check():
 # === Model Version Detection ===
 
 @app.get("/models/detect-new")
-async def detect_new_models():
+async def detect_new_models(_auth: bool = Depends(require_internal_key)):
     """
     Detect new or updated models in local Ollama installation
 
     Returns list of new/updated models since last check
     """
     try:
-        new_models = detector.detect_new_models()
+        new_models = await run_in_threadpool(detector.detect_new_models)
 
         # Store in Redis if available
         if redis_available:
@@ -134,10 +140,10 @@ async def detect_new_models():
 
 
 @app.get("/models/status")
-async def get_model_status():
+async def get_model_status(_auth: bool = Depends(require_internal_key)):
     """Get current model detection status"""
     try:
-        status = detector.get_status()
+        status = await run_in_threadpool(detector.get_status)
         return {
             "status": "success",
             "detector_status": status
@@ -148,10 +154,10 @@ async def get_model_status():
 
 
 @app.get("/models/available-downloads")
-async def get_available_downloads():
+async def get_available_downloads(_auth: bool = Depends(require_internal_key)):
     """Get models available for download from Ollama library"""
     try:
-        available = detector.check_ollama_library_for_updates()
+        available = await run_in_threadpool(detector.check_ollama_library_for_updates)
         return {
             "status": "success",
             "available_count": len(available),
@@ -163,7 +169,7 @@ async def get_available_downloads():
 
 
 @app.post("/models/pull")
-async def pull_model(request: ModelPullRequest, background_tasks: BackgroundTasks):
+async def pull_model(request: ModelPullRequest, background_tasks: BackgroundTasks, _auth: bool = Depends(require_internal_key)):
     """Pull a model from Ollama library"""
     try:
         # Run pull in background
@@ -182,7 +188,7 @@ async def pull_model(request: ModelPullRequest, background_tasks: BackgroundTask
 # === Automatic Testing & Improvement ===
 
 @app.post("/improve/test-model")
-async def test_model(request: ModelTestRequest, background_tasks: BackgroundTasks):
+async def test_model(request: ModelTestRequest, background_tasks: BackgroundTasks, _auth: bool = Depends(require_internal_key)):
     """
     Test a model and generate improvement training data
 
@@ -226,7 +232,7 @@ async def test_model(request: ModelTestRequest, background_tasks: BackgroundTask
 
 
 @app.get("/improve/status/{task_id}")
-async def get_improvement_status(task_id: str):
+async def get_improvement_status(task_id: str, _auth: bool = Depends(require_internal_key)):
     """Get status of an improvement task"""
     if task_id not in improvement_tasks:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -235,7 +241,7 @@ async def get_improvement_status(task_id: str):
 
 
 @app.get("/improve/tasks")
-async def list_improvement_tasks():
+async def list_improvement_tasks(_auth: bool = Depends(require_internal_key)):
     """List all improvement tasks"""
     return {
         "status": "success",
@@ -245,7 +251,7 @@ async def list_improvement_tasks():
 
 
 @app.post("/improve/automatic")
-async def run_automatic_improvement(background_tasks: BackgroundTasks):
+async def run_automatic_improvement(background_tasks: BackgroundTasks, _auth: bool = Depends(require_internal_key)):
     """
     Run automatic improvement on all new models detected
 
@@ -256,7 +262,7 @@ async def run_automatic_improvement(background_tasks: BackgroundTasks):
 
     try:
         # Detect new models
-        new_models = detector.detect_new_models()
+        new_models = await run_in_threadpool(detector.detect_new_models)
 
         if not new_models:
             return {
@@ -305,7 +311,7 @@ async def run_automatic_improvement(background_tasks: BackgroundTasks):
 # === Integration with Orchestrator ===
 
 @app.post("/orchestrator/report-improvement")
-async def report_improvement_to_orchestrator(task_id: str):
+async def report_improvement_to_orchestrator(task_id: str, _auth: bool = Depends(require_internal_key)):
     """
     Report improvement results to meta-orchestrator
 
@@ -321,9 +327,7 @@ async def report_improvement_to_orchestrator(task_id: str):
 
     try:
         # Report to meta-orchestrator
-        import requests
-
-        response = requests.post(
+        response = await _http.post(
             f"{META_ORCHESTRATOR_URL}/performance/update",
             json={
                 "model_name": task["model_name"],
@@ -331,7 +335,7 @@ async def report_improvement_to_orchestrator(task_id: str):
                 "win_rate": task["results"]["statistics"]["win_rate"],
                 "timestamp": task["completed_at"]
             },
-            timeout=10
+            headers=internal_headers()
         )
 
         if response.status_code == 200:
@@ -355,19 +359,17 @@ async def report_improvement_to_orchestrator(task_id: str):
 
 
 @app.get("/orchestrator/model-recommendations")
-async def get_model_recommendations():
+async def get_model_recommendations(_auth: bool = Depends(require_internal_key)):
     """
     Get model recommendations from model-manager
 
     This helps determine which models to prioritize for improvement
     """
     try:
-        import requests
-
-        response = requests.get(
+        response = await _http.get(
             f"{MODEL_MANAGER_URL}/recommend-model",
             params={"task_type": "code_generation"},
-            timeout=10
+            headers=internal_headers()
         )
 
         if response.status_code == 200:
@@ -460,6 +462,12 @@ async def startup_event():
     asyncio.create_task(monitoring_loop())
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close the shared async HTTP client on shutdown"""
+    await _http.aclose()
+
+
 async def monitoring_loop():
     """
     Continuous monitoring loop
@@ -477,7 +485,7 @@ async def monitoring_loop():
             logger.info("Monitoring: Checking for new models...")
 
             # Detect new models
-            new_models = detector.detect_new_models()
+            new_models = await run_in_threadpool(detector.detect_new_models)
 
             if new_models:
                 logger.info(f"Monitoring: Found {len(new_models)} new models")

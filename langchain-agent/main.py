@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
+from internal_auth import require_internal_key, internal_headers
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import requests
@@ -162,6 +164,7 @@ def get_best_model_for_task(task_type: str) -> str:
         response = requests.get(
             f"{model_manager_url}/recommend-model",
             params={"task_type": task_type},
+            headers=internal_headers(),
             timeout=30
         )
         if response.status_code == 200:
@@ -193,7 +196,7 @@ def create_agent(memory: ConversationBufferMemory):
     )
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, _auth: bool = Depends(require_internal_key)):
     """Enhanced chat endpoint with reasoning and tool usage"""
     try:
         # Check cache first
@@ -213,7 +216,7 @@ async def chat_endpoint(request: ChatRequest):
         agent = create_agent(memory)
 
         # Use the agent for enhanced reasoning
-        response = agent.run(input=request.message)
+        response = await run_in_threadpool(agent.run, input=request.message)
         
         # Extract tools used from the agent's execution
         tools_used = []
@@ -238,7 +241,7 @@ async def chat_endpoint(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/reflect", response_model=ReflectionResponse)
-async def reflect_endpoint(request: ReflectionRequest):
+async def reflect_endpoint(request: ReflectionRequest, _auth: bool = Depends(require_internal_key)):
     """Reflection endpoint for self-improvement and verification"""
     try:
         reflection_prompt = f"""
@@ -260,7 +263,8 @@ async def reflect_endpoint(request: ReflectionRequest):
         CONFIDENCE: [confidence score]
         """
         
-        response = requests.post(
+        response = await run_in_threadpool(
+            requests.post,
             f"{ollama_base_url}/api/generate",
             json={
                 "model": model_name,
@@ -270,7 +274,7 @@ async def reflect_endpoint(request: ReflectionRequest):
             },
             timeout=120
         )
-        
+
         if response.status_code == 200:
             reflection_text = response.json().get("response", "")
             
@@ -309,10 +313,10 @@ async def health_check():
     return {"status": "healthy", "service": "langchain-agent"}
 
 @app.get("/models")
-async def list_models():
+async def list_models(_auth: bool = Depends(require_internal_key)):
     """List available models"""
     try:
-        response = requests.get(f"{ollama_base_url}/api/tags", timeout=30)
+        response = await run_in_threadpool(requests.get, f"{ollama_base_url}/api/tags", timeout=30)
         if response.status_code == 200:
             return response.json()
         else:

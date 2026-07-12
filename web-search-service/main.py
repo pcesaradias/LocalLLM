@@ -2,12 +2,15 @@
 Web Search Service - Real-time web search for your Local LLM
 Uses DuckDuckGo (free, no API key needed)
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import List, Optional
 import logging
 from duckduckgo_search import DDGS
 import time
+
+from internal_auth import require_internal_key
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +44,7 @@ async def health_check():
 
 
 @app.post("/search", response_model=SearchResponse)
-async def web_search(request: SearchRequest):
+async def web_search(request: SearchRequest, _auth: bool = Depends(require_internal_key)):
     """
     Search the web using DuckDuckGo
     Returns top results with title, URL, and snippet
@@ -52,7 +55,8 @@ async def web_search(request: SearchRequest):
 
         results = []
         with DDGS() as ddgs:
-            search_results = ddgs.text(
+            search_results = await run_in_threadpool(
+                ddgs.text,
                 request.query,
                 region=request.region,
                 safesearch="moderate",
@@ -81,7 +85,7 @@ async def web_search(request: SearchRequest):
 
 
 @app.post("/search_and_summarize")
-async def search_and_summarize(request: SearchRequest, model_endpoint: str = "http://localllm:8080"):
+async def search_and_summarize(request: SearchRequest, model_endpoint: str = "http://localllm:8080", _auth: bool = Depends(require_internal_key)):
     """
     Search web and have LLM summarize the results
     Returns answer with sources

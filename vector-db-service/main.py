@@ -15,9 +15,12 @@ from datetime import datetime
 
 import chromadb
 from chromadb.config import Settings
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+
+from internal_auth import require_internal_key
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -101,13 +104,13 @@ class VectorDBService:
             logger.error(f"Error getting/creating collection: {e}")
             raise HTTPException(status_code=500, detail=f"Collection error: {str(e)}")
 
-    def add_document(self, document: Document) -> Dict[str, Any]:
+    async def add_document(self, document: Document) -> Dict[str, Any]:
         """Add a single document to the vector database"""
         try:
             collection = self.get_or_create_collection(document.collection_name)
 
             # Generate embedding
-            embedding = embedding_model.encode(document.content).tolist()
+            embedding = (await run_in_threadpool(embedding_model.encode, document.content)).tolist()
 
             # Generate document ID
             doc_id = f"doc_{int(time.time() * 1000)}"
@@ -138,7 +141,7 @@ class VectorDBService:
             logger.error(f"Error adding document: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to add document: {str(e)}")
 
-    def add_documents_batch(self, documents: List[Document]) -> Dict[str, Any]:
+    async def add_documents_batch(self, documents: List[Document]) -> Dict[str, Any]:
         """Add multiple documents in batch"""
         try:
             # Group documents by collection
@@ -154,7 +157,7 @@ class VectorDBService:
 
                 # Generate embeddings for all documents
                 contents = [doc.content for doc in docs]
-                embeddings = embedding_model.encode(contents).tolist()
+                embeddings = (await run_in_threadpool(embedding_model.encode, contents)).tolist()
 
                 # Generate IDs and metadata
                 doc_ids = [f"doc_{int(time.time() * 1000)}_{i}" for i in range(len(docs))]
@@ -189,7 +192,7 @@ class VectorDBService:
             logger.error(f"Error adding batch: {e}")
             raise HTTPException(status_code=500, detail=f"Batch add failed: {str(e)}")
 
-    def search(self, query: SearchQuery) -> SearchResponse:
+    async def search(self, query: SearchQuery) -> SearchResponse:
         """Search for similar documents"""
         start_time = time.time()
 
@@ -197,7 +200,7 @@ class VectorDBService:
             collection = self.get_or_create_collection(query.collection_name)
 
             # Generate query embedding
-            query_embedding = embedding_model.encode(query.query).tolist()
+            query_embedding = (await run_in_threadpool(embedding_model.encode, query.query)).tolist()
 
             # Perform search
             results = collection.query(
@@ -282,27 +285,27 @@ async def health():
 
 
 @app.post("/documents/add")
-async def add_document(document: Document):
+async def add_document(document: Document, _auth: bool = Depends(require_internal_key)):
     """Add a single document to the vector database"""
-    result = vector_service.add_document(document)
+    result = await vector_service.add_document(document)
     return {"status": "success", **result}
 
 
 @app.post("/documents/add-batch")
-async def add_documents_batch(batch: DocumentBatch):
+async def add_documents_batch(batch: DocumentBatch, _auth: bool = Depends(require_internal_key)):
     """Add multiple documents in batch"""
-    result = vector_service.add_documents_batch(batch.documents)
+    result = await vector_service.add_documents_batch(batch.documents)
     return {"status": "success", **result}
 
 
 @app.post("/search", response_model=SearchResponse)
-async def search(query: SearchQuery):
+async def search(query: SearchQuery, _auth: bool = Depends(require_internal_key)):
     """Search for similar documents using semantic similarity"""
-    return vector_service.search(query)
+    return await vector_service.search(query)
 
 
 @app.get("/collections")
-async def list_collections():
+async def list_collections(_auth: bool = Depends(require_internal_key)):
     """List all collections"""
     collections = vector_service.list_collections()
     return {
@@ -312,13 +315,13 @@ async def list_collections():
 
 
 @app.delete("/collections/{collection_name}")
-async def delete_collection(collection_name: str):
+async def delete_collection(collection_name: str, _auth: bool = Depends(require_internal_key)):
     """Delete a collection"""
     return vector_service.delete_collection(collection_name)
 
 
 @app.get("/collections/{collection_name}/stats")
-async def get_collection_stats(collection_name: str):
+async def get_collection_stats(collection_name: str, _auth: bool = Depends(require_internal_key)):
     """Get statistics for a collection"""
     try:
         collection = vector_service.get_or_create_collection(collection_name)

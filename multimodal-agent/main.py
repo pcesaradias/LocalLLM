@@ -1,7 +1,7 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
-import requests
+import httpx
 import json
 import redis
 import os
@@ -9,6 +9,8 @@ import base64
 from io import BytesIO
 from PIL import Image
 import logging
+
+from internal_auth import require_internal_key
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +27,9 @@ multimodal_model = os.getenv("MULTIMODAL_MODEL", "qwen2.5-vl:7b")
 
 # Maximum allowed size for uploaded images (10 MB)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# Shared async HTTP client for Ollama calls (long read timeout for image analysis)
+_http = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0))
 
 class MultimodalRequest(BaseModel):
     message: str
@@ -67,7 +72,7 @@ class ImageAnalysisTool:
         self.name = "image_analyzer"
         self.description = "Analyzes images to extract text, objects, and visual information"
 
-    def analyze_image(self, image_data: str, prompt: str) -> str:
+    async def analyze_image(self, image_data: str, prompt: str) -> str:
         """Analyze image using Qwen2.5-VL"""
         try:
             # Prepare multimodal prompt
@@ -80,8 +85,8 @@ class ImageAnalysisTool:
             3. Visual characteristics
             4. Overall context and meaning
             """
-            
-            response = requests.post(
+
+            response = await _http.post(
                 f"{ollama_base_url}/api/generate",
                 json={
                     "model": multimodal_model,
@@ -106,7 +111,7 @@ class CodeGenerationTool:
         self.name = "code_generator"
         self.description = "Generates code from visual designs and screenshots"
 
-    def generate_code_from_image(self, image_data: str, target_language: str, requirements: str = "") -> Dict[str, Any]:
+    async def generate_code_from_image(self, image_data: str, target_language: str, requirements: str = "") -> Dict[str, Any]:
         """Generate code from visual design using Qwen2.5-VL"""
         try:
             prompt = f"""
@@ -120,7 +125,7 @@ class CodeGenerationTool:
             3. Any necessary dependencies or setup instructions
             """
             
-            response = requests.post(
+            response = await _http.post(
                 f"{ollama_base_url}/api/generate",
                 json={
                     "model": multimodal_model,
@@ -150,7 +155,7 @@ class DocumentParserTool:
         self.name = "document_parser"
         self.description = "Extracts structured data from documents, tables, and diagrams"
 
-    def parse_document(self, image_data: str, analysis_type: str) -> Dict[str, Any]:
+    async def parse_document(self, image_data: str, analysis_type: str) -> Dict[str, Any]:
         """Parse document using Qwen2.5-VL"""
         try:
             if analysis_type == "table_extraction":
@@ -160,7 +165,7 @@ class DocumentParserTool:
             else:  # text_extraction
                 prompt = "Extract all text content from this document. Preserve formatting and structure."
             
-            response = requests.post(
+            response = await _http.post(
                 f"{ollama_base_url}/api/generate",
                 json={
                     "model": multimodal_model,
@@ -191,7 +196,7 @@ code_generator = CodeGenerationTool()
 document_parser = DocumentParserTool()
 
 @app.post("/analyze-image", response_model=MultimodalResponse)
-async def analyze_image_endpoint(request: MultimodalRequest):
+async def analyze_image_endpoint(request: MultimodalRequest, _auth: bool = Depends(require_internal_key)):
     """Analyze image and respond to multimodal queries"""
     try:
         if not request.image_data:
@@ -206,7 +211,7 @@ async def analyze_image_endpoint(request: MultimodalRequest):
             return MultimodalResponse(**json.loads(cached_response))
         
         # Analyze image
-        analysis_result = image_analyzer.analyze_image(request.image_data, request.message)
+        analysis_result = await image_analyzer.analyze_image(request.image_data, request.message)
         
         # Extract objects (simplified - in production would use object detection)
         objects_detected = _extract_objects_from_analysis(analysis_result)
@@ -229,10 +234,10 @@ async def analyze_image_endpoint(request: MultimodalRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate-code-from-image", response_model=CodeFromImageResponse)
-async def generate_code_from_image_endpoint(request: CodeFromImageRequest):
+async def generate_code_from_image_endpoint(request: CodeFromImageRequest, _auth: bool = Depends(require_internal_key)):
     """Generate code from UI/design screenshots"""
     try:
-        result = code_generator.generate_code_from_image(
+        result = await code_generator.generate_code_from_image(
             request.image_data, 
             request.target_language, 
             request.requirements or ""
@@ -253,10 +258,10 @@ async def generate_code_from_image_endpoint(request: CodeFromImageRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze-document", response_model=DocumentAnalysisResponse)
-async def analyze_document_endpoint(request: DocumentAnalysisRequest):
+async def analyze_document_endpoint(request: DocumentAnalysisRequest, _auth: bool = Depends(require_internal_key)):
     """Analyze documents, tables, and diagrams"""
     try:
-        result = document_parser.parse_document(request.image_data, request.analysis_type)
+        result = await document_parser.parse_document(request.image_data, request.analysis_type)
         
         if "error" in result:
             raise HTTPException(status_code=500, detail=result["error"])
@@ -273,7 +278,7 @@ async def analyze_document_endpoint(request: DocumentAnalysisRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/upload-image")
-async def upload_image(file: UploadFile = File(...)):
+async def upload_image(file: UploadFile = File(...), _auth: bool = Depends(require_internal_key)):
     """Upload and process image file"""
     try:
         # Read and encode image
@@ -320,16 +325,21 @@ def _structure_extracted_data(content: str) -> Dict[str, Any]:
     
     return structured_data
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close the shared async HTTP client on shutdown"""
+    await _http.aclose()
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "multimodal-agent"}
 
 @app.get("/models")
-async def list_models():
+async def list_models(_auth: bool = Depends(require_internal_key)):
     """List available multimodal models"""
     try:
-        response = requests.get(f"{ollama_base_url}/api/tags")
+        response = await _http.get(f"{ollama_base_url}/api/tags")
         if response.status_code == 200:
             models = response.json().get("models", [])
             multimodal_models = [model for model in models if "vl" in model["name"].lower() or "vision" in model["name"].lower()]

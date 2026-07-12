@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional, TypedDict
-import requests
+import httpx
 import json
 import redis
 import os
@@ -9,6 +9,8 @@ import logging
 from datetime import datetime
 from enum import Enum
 import time
+
+from internal_auth import internal_headers
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +25,9 @@ redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:63
 MULTIMODAL_SERVICE_URL = os.getenv("MULTIMODAL_SERVICE_URL", "http://multimodal-agent:8002")
 LANGCHAIN_SERVICE_URL = os.getenv("LANGCHAIN_SERVICE_URL", "http://langchain-agent:8000")
 LOCALLLM_SERVICE_URL = os.getenv("LOCALLLM_SERVICE_URL", "http://localllm:8080")
+
+# Shared async HTTP client for outbound calls to internal services
+_http = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0))
 
 class WorkflowType(str, Enum):
     VISION_TO_CODE = "vision_to_code"
@@ -118,10 +123,10 @@ class VisionToCodeWorkflow:
                 "conversation_id": state["workflow_id"]
             }
             
-            response = requests.post(
+            response = await _http.post(
                 f"{MULTIMODAL_SERVICE_URL}/analyze-image",
                 json=analysis_request,
-                timeout=60
+                headers=internal_headers()
             )
             
             if response.status_code == 200:
@@ -170,10 +175,10 @@ class VisionToCodeWorkflow:
                 "temperature": 0.3
             }
             
-            response = requests.post(
+            response = await _http.post(
                 f"{LANGCHAIN_SERVICE_URL}/chat",
                 json=code_request,
-                timeout=120
+                headers=internal_headers()
             )
             
             if response.status_code == 200:
@@ -235,10 +240,10 @@ class VisionToCodeWorkflow:
                 "temperature": 0.2
             }
             
-            response = requests.post(
+            response = await _http.post(
                 f"{LANGCHAIN_SERVICE_URL}/chat",
                 json=refinement_request,
-                timeout=120
+                headers=internal_headers()
             )
             
             if response.status_code == 200:
@@ -415,7 +420,8 @@ async def health_check():
         ("localllm", LOCALLLM_SERVICE_URL)
     ]:
         try:
-            response = requests.get(f"{service_url}/health", timeout=5)
+            headers = internal_headers() if service_name != "localllm" else {}
+            response = await _http.get(f"{service_url}/health", headers=headers, timeout=5)
             services_healthy[service_name] = response.status_code == 200
         except:
             services_healthy[service_name] = False
@@ -425,6 +431,11 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "services": services_healthy
     }
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close the shared async HTTP client on shutdown"""
+    await _http.aclose()
 
 if __name__ == "__main__":
     import uvicorn
