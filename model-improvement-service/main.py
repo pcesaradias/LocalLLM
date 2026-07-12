@@ -335,7 +335,8 @@ async def report_improvement_to_orchestrator(task_id: str, _auth: bool = Depends
                 "win_rate": task["results"]["statistics"]["win_rate"],
                 "timestamp": task["completed_at"]
             },
-            headers=internal_headers()
+            headers=internal_headers(),
+            timeout=10
         )
 
         if response.status_code == 200:
@@ -369,7 +370,8 @@ async def get_model_recommendations(_auth: bool = Depends(require_internal_key))
         response = await _http.get(
             f"{MODEL_MANAGER_URL}/recommend-model",
             params={"task_type": "code_generation"},
-            headers=internal_headers()
+            headers=internal_headers(),
+            timeout=10
         )
 
         if response.status_code == 200:

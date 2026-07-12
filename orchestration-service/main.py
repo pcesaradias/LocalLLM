@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional, TypedDict
 import httpx
@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 import time
 
-from internal_auth import internal_headers
+from internal_auth import internal_headers, require_internal_key
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -126,7 +126,8 @@ class VisionToCodeWorkflow:
             response = await _http.post(
                 f"{MULTIMODAL_SERVICE_URL}/analyze-image",
                 json=analysis_request,
-                headers=internal_headers()
+                headers=internal_headers(),
+                timeout=60
             )
             
             if response.status_code == 200:
@@ -178,7 +179,8 @@ class VisionToCodeWorkflow:
             response = await _http.post(
                 f"{LANGCHAIN_SERVICE_URL}/chat",
                 json=code_request,
-                headers=internal_headers()
+                headers=internal_headers(),
+                timeout=120
             )
             
             if response.status_code == 200:
@@ -243,7 +245,8 @@ class VisionToCodeWorkflow:
             response = await _http.post(
                 f"{LANGCHAIN_SERVICE_URL}/chat",
                 json=refinement_request,
-                headers=internal_headers()
+                headers=internal_headers(),
+                timeout=120
             )
             
             if response.status_code == 200:
@@ -322,7 +325,7 @@ WORKFLOW_REGISTRY = {
 }
 
 @app.post("/execute-workflow", response_model=WorkflowResponse)
-async def execute_workflow(request: WorkflowRequest):
+async def execute_workflow(request: WorkflowRequest, _auth: bool = Depends(require_internal_key)):
     """Execute a multi-agent workflow"""
     try:
         workflow_id = f"workflow_{int(time.time())}_{hash(str(request.dict()))}"
@@ -387,7 +390,7 @@ async def execute_workflow(request: WorkflowRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/workflow/{workflow_id}")
-async def get_workflow_result(workflow_id: str):
+async def get_workflow_result(workflow_id: str, _auth: bool = Depends(require_internal_key)):
     """Get workflow result by ID"""
     cached_result = redis_client.get(f"workflow:{workflow_id}")
     if cached_result:
@@ -396,7 +399,7 @@ async def get_workflow_result(workflow_id: str):
         raise HTTPException(status_code=404, detail="Workflow not found")
 
 @app.get("/workflows")
-async def list_workflows():
+async def list_workflows(_auth: bool = Depends(require_internal_key)):
     """List available workflows"""
     return {
         "workflows": [

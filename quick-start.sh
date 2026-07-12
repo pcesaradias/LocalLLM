@@ -84,11 +84,10 @@ check_service() {
     fi
 }
 
-# Only host-published (user-facing) services are checked here. Backend
-# services (vector-db, web-search, model-manager, etc.) run on the internal
+# Only host-published (user-facing) services are checked here. Backend services
+# (orchestration, vector-db, web-search, model-manager, etc.) run on the internal
 # network and are verified via `docker compose ps` health status instead.
 check_service "LocalLLM" "http://localhost:8080/health"
-check_service "Orchestration" "http://localhost:8003/health"
 check_service "Meta-Orchestrator" "http://localhost:8004/health"
 
 # Get API key from the .env file (the key is never exposed over an open endpoint)

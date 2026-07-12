@@ -77,7 +77,6 @@ services:
         condition: service_healthy
     environment:
       - VITE_API_URL=http://localhost:8080
-      - VITE_ORCHESTRATION_URL=http://localhost:8003
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -96,8 +95,8 @@ services:
       context: ./orchestration-service
       dockerfile: Dockerfile
     container_name: localllm-orchestration
-    ports:
-      - "8003:8003"  # Called directly by the browser UI
+    expose:
+      - "8003"       # Internal only; auth via INTERNAL_API_KEY
     depends_on:
       localllm:
         condition: service_healthy

@@ -460,6 +460,7 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
             response = await _http.post(
                 f"{service_info['url']}/execute-workflow",
                 json=workflow_request,
+                headers=internal_headers(),
                 timeout=300
             )
         else:

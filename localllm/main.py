@@ -24,6 +24,8 @@ import httpx
 import sys
 sys.path.append("/app")
 from localllm.cache_utils import PromptCacheManager
+from internal_auth import internal_headers
+from starlette.concurrency import run_in_threadpool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -117,6 +119,7 @@ async def retrieve_context(query: str, collection: str = "knowledge_base", top_k
                 "collection_name": collection,
                 "top_k": top_k
             },
+            headers=internal_headers(),
             timeout=5
         )
         if response.status_code == 200:
@@ -947,8 +950,8 @@ async def delete_model(model_name: str, api_key: str = Depends(verify_api_key)):
 
         if response.status_code == 200:
             logger.info(f"Successfully deleted model {model_name}")
-            # Refresh available models
-            llm_service.load_models()
+            # Refresh available models (load_models is sync; keep it off the loop)
+            await run_in_threadpool(llm_service.load_models)
             return {
                 "status": "success",
                 "message": f"Model {model_name} deleted successfully",
