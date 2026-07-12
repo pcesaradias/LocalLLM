@@ -352,6 +352,10 @@ services:
       - META_ORCHESTRATOR_URL=http://meta-orchestrator:8004
       - MODEL_MANAGER_URL=http://model-manager:8005
       - COMMERCIAL_AI_API_KEY=${COMMERCIAL_AI_API_KEY:-${ANTHROPIC_API_KEY:-}}
+      # Reference + judge for the self-improvement pipeline (automatic_tester)
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - REFERENCE_MODEL=${REFERENCE_MODEL:-llama-3.3-70b-versatile}
     volumes:
       - ./comparison_results:/app/comparison_results
       - ./datasets/lora_profiles:/app/datasets/lora_profiles

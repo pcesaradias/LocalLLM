@@ -409,11 +409,13 @@ async def run_improvement_pipeline(
     try:
         logger.info(f"Starting improvement pipeline for {model_name} (task: {task_id})")
 
-        # Run full pipeline
-        results = tester.full_improvement_pipeline(
-            model_name=model_name,
-            num_tests=num_tests,
-            create_improved=create_improved
+        # Run full pipeline off the event loop (it uses blocking requests to
+        # Ollama + the reference/judge API).
+        results = await run_in_threadpool(
+            tester.full_improvement_pipeline,
+            model_name,
+            num_tests,
+            create_improved,
         )
 
         # Update task status

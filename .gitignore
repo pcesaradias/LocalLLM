@@ -237,3 +237,4 @@ README_INTERNAL.md
 # Generated comparison/feedback data
 comparison_results/
 conversation_feedback/
+datasets/lora_profiles/auto_*.jsonl
