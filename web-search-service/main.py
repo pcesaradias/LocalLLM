@@ -7,7 +7,11 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import List, Optional
 import logging
-from duckduckgo_search import DDGS
+try:
+    from ddgs import DDGS  # maintained successor of duckduckgo-search
+except ImportError:  # pragma: no cover
+    from duckduckgo_search import DDGS
+import asyncio
 import time
 
 from internal_auth import require_internal_key
@@ -53,25 +57,38 @@ async def web_search(request: SearchRequest, _auth: bool = Depends(require_inter
         start_time = time.time()
         logger.info(f"Searching for: {request.query}")
 
+        # DuckDuckGo rate-limits automated/datacenter traffic; retry with
+        # backoff, then degrade gracefully (empty results, HTTP 200) instead of
+        # 500 so callers (orchestration/meta) don't break on a transient limit.
         results = []
-        with DDGS() as ddgs:
-            search_results = await run_in_threadpool(
-                ddgs.text,
-                request.query,
-                region=request.region,
-                safesearch="moderate",
-                max_results=request.max_results
-            )
-
-            for result in search_results:
-                results.append(SearchResult(
-                    title=result.get("title", ""),
-                    url=result.get("href", ""),
-                    snippet=result.get("body", "")
-                ))
+        last_error = None
+        for attempt in range(3):
+            try:
+                with DDGS() as ddgs:
+                    search_results = await run_in_threadpool(
+                        ddgs.text,
+                        request.query,
+                        region=request.region,
+                        safesearch="moderate",
+                        max_results=request.max_results
+                    )
+                for result in search_results:
+                    results.append(SearchResult(
+                        title=result.get("title", ""),
+                        url=result.get("href") or result.get("url", ""),
+                        snippet=result.get("body", "")
+                    ))
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Search attempt {attempt + 1} failed: {e}")
+                await asyncio.sleep(1.5 * (attempt + 1))
 
         search_time = time.time() - start_time
-        logger.info(f"Found {len(results)} results in {search_time:.2f}s")
+        if not results and last_error is not None:
+            logger.error(f"Search degraded (no results after retries): {last_error}")
+        else:
+            logger.info(f"Found {len(results)} results in {search_time:.2f}s")
 
         return SearchResponse(
             query=request.query,
