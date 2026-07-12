@@ -2,18 +2,20 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: 'ollama'
+  # Only services that actually expose a Prometheus /metrics endpoint are
+  # scraped, at their real ports. localllm serves /metrics from its main app
+  # (8080); reflection-agent serves it on 5012. The previous config pointed at
+  # wrong ports and at services that expose no metrics.
+  #
+  # NOTE: reflection-agent and Prometheus itself are not part of
+  # docker-compose-simplified.yml. Add them (and instrument the remaining
+  # services) per RECOMMENDATIONS.md before relying on this.
+  - job_name: 'localllm'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['ollama:11434']
-    
-  - job_name: 'langchain-agent'
-    static_configs:
-      - targets: ['langchain-agent:8000']
-    
-  - job_name: 'model-manager'
-    static_configs:
-      - targets: ['model-manager:8001']
-    
+      - targets: ['localllm:8080']
+
   - job_name: 'reflection-agent'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['reflection-agent:8002']
+      - targets: ['reflection-agent:5012']
