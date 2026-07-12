@@ -40,6 +40,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - MONITORING_PORT=8081
       - VECTOR_DB_URL=http://vector-db:8007
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3001}
@@ -104,6 +105,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - MULTIMODAL_SERVICE_URL=http://multimodal-agent:8002
       - LANGCHAIN_SERVICE_URL=http://langchain-agent:8000
       - LOCALLLM_SERVICE_URL=http://localllm:8080
@@ -133,6 +135,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - MULTIMODAL_MODEL=qwen3:latest
     restart: unless-stopped
@@ -163,6 +166,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - MODEL_NAME=qwen3-coder:latest
       - LATEST_CODER_MODEL=qwen3-coder:latest
@@ -193,6 +197,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
     restart: unless-stopped
     security_opt:
@@ -234,6 +239,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - LOCALLLM_API_KEY=${LOCALLLM_API_KEY}
       - ORCHESTRATION_URL=http://orchestration:8003
       - MULTIMODAL_URL=http://multimodal-agent:8002
@@ -268,6 +274,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -325,6 +332,7 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - OLLAMA_URL=http://host.docker.internal:11434
       - META_ORCHESTRATOR_URL=http://meta-orchestrator:8004
       - MODEL_MANAGER_URL=http://model-manager:8005
