@@ -241,6 +241,9 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - LOCALLLM_API_KEY=${LOCALLLM_API_KEY}
+      # Provisions the meta-orchestrator's own API key (APIKeyValidator). Unified
+      # with LOCALLLM_API_KEY so one key works across the user-facing services.
+      - API_KEY=${LOCALLLM_API_KEY}
       - ORCHESTRATION_URL=http://orchestration:8003
       - MULTIMODAL_URL=http://multimodal-agent:8002
       - LANGCHAIN_URL=http://langchain-agent:8000
