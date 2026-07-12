@@ -108,17 +108,33 @@ exercised end-to-end. Stand it up, drive a chat + a RAG query + a workflow, and
 confirm auth flows and streaming work under concurrency before flipping the
 status to production-ready.
 
-### 2. Migrate inference from Ollama to vLLM or SGLang (HIGH — throughput + LoRA)
-Ollama is a single-user/dev tool; it processes requests largely sequentially and
-degrades sharply under concurrency (benchmarks show it collapsing at ~10–40
-concurrent users where vLLM sustains 180+). vLLM adds PagedAttention + continuous
-batching, an OpenAI-compatible API (which the FastAPI services already speak), a
-native Prometheus `/metrics` endpoint, and — directly relevant to this repo's
-reflexion/LoRA loop — **hot-swappable Unsloth LoRA adapters**
-(`--enable-lora`, runtime adapter loading) instead of Ollama's merge-and-reexport
-per iteration. Keep Ollama as the dev/default; make the backend URL configurable.
+### 2. Inference backend — DONE for localllm (OpenAI-compatible); extend to other services
+Ollama is a single-user/dev tool that degrades under concurrency (benchmarks show
+it collapsing at ~10–40 concurrent users where vLLM sustains 180+). Rather than
+bind to vLLM specifically, `localllm` now has a **pluggable OpenAI-compatible
+backend** (`localllm/inference.py`, `INFERENCE_BACKEND=ollama|openai`). Point
+`OPENAI_BASE_URL` at:
+- **vLLM / SGLang** (self-hosted GPU) — PagedAttention, continuous batching,
+  hot-swappable Unsloth LoRA adapters (`--enable-lora`);
+- or a **hosted API with no local GPU** — Groq (free), OpenRouter, Together,
+  Gemini. This is the practical path on machines without an NVIDIA GPU.
+
+Verified live: the openai backend, pointed at Ollama's own `/v1`, works for chat,
+SSE streaming and reflexion — so it works identically against Groq/OpenRouter/vLLM.
+**Remaining:** apply the same `inference.py` abstraction to `langchain-agent`,
+`multimodal-agent`, and `model-manager` (still Ollama-native), and add a vLLM
+compose profile for GPU hosts.
 - Ollama vs vLLM benchmark: https://developers.redhat.com/articles/2025/08/08/ollama-vs-vllm-deep-dive-performance-benchmarking
 - Unsloth vLLM/LoRA serving: https://docs.unsloth.ai/basics/inference-and-deployment/vllm-guide
+
+### 2b. Reflexion works; the automated retraining loop is a stub (finding)
+Live testing confirmed the **reflexion (CoVe) loop works** — it scores responses
+and corrects wrong answers. But the **automated self-improvement/retraining is not
+implemented**: `model-improvement-service` imports `automatic_tester`, a module
+that does not exist in the repo, so `/improve/automatic` returns 501. The Unsloth
+LoRA training scripts exist but are meant to run manually on GPU (Colab/Kaggle
+free T4, or RunPod ~$0.20/h) — the "automatic" glue is missing and should either
+be implemented or the README claim softened.
 
 ### 3. Make resilience real (MEDIUM) — lifespan shutdown DONE; breaker remaining
 `meta-orchestrator` constructs `CircuitBreaker`/`retry_with_backoff` and never
