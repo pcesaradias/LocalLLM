@@ -20,7 +20,13 @@ import json
 from datetime import datetime
 
 from model_version_detector import ModelVersionDetector
-from automatic_tester import AutomaticTester
+
+try:
+    from automatic_tester import AutomaticTester
+except ImportError:
+    # automatic_tester is optional - service starts without it and automatic
+    # testing endpoints return 501 when invoked
+    AutomaticTester = None
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -44,7 +50,7 @@ MODEL_MANAGER_URL = os.getenv("MODEL_MANAGER_URL", "http://localhost:8005")
 
 # Initialize components
 detector = ModelVersionDetector(ollama_url=OLLAMA_URL)
-tester = AutomaticTester(claude_api_key=CLAUDE_API_KEY, ollama_url=OLLAMA_URL)
+tester = AutomaticTester(claude_api_key=CLAUDE_API_KEY, ollama_url=OLLAMA_URL) if AutomaticTester else None
 
 # Redis client for state management
 try:
@@ -182,6 +188,9 @@ async def test_model(request: ModelTestRequest, background_tasks: BackgroundTask
 
     Runs full comparison test against commercial AI and generates reflexion data
     """
+    if tester is None:
+        raise HTTPException(status_code=501, detail="Automatic testing not available - automatic_tester module is not installed")
+
     try:
         task_id = f"test_{request.model_name.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -242,6 +251,9 @@ async def run_automatic_improvement(background_tasks: BackgroundTasks):
 
     This is the main endpoint the orchestrator calls when new models are detected
     """
+    if tester is None:
+        raise HTTPException(status_code=501, detail="Automatic testing not available - automatic_tester module is not installed")
+
     try:
         # Detect new models
         new_models = detector.detect_new_models()
@@ -381,6 +393,15 @@ async def run_improvement_pipeline(
 
     This is the main automatic improvement logic
     """
+    if tester is None:
+        logger.error(f"Cannot run improvement pipeline for {model_name}: automatic_tester module not available")
+        improvement_tasks[task_id].update({
+            "status": "failed",
+            "completed_at": datetime.now().isoformat(),
+            "error": "automatic_tester module not available"
+        })
+        return
+
     try:
         logger.info(f"Starting improvement pipeline for {model_name} (task: {task_id})")
 
@@ -500,6 +521,6 @@ if __name__ == "__main__":
     logger.info("MODEL IMPROVEMENT SERVICE")
     logger.info("="*80)
     logger.info(f"Starting on port {port}")
-    logger.info()
+    logger.info("Starting model-improvement-service...")
 
     uvicorn.run(app, host="0.0.0.0", port=port)

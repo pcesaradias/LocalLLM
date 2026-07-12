@@ -422,6 +422,10 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
     start_time = time.time()
     session_id = request.session_id or str(uuid.uuid4())
     
+    best_service = None
+    service_info = None
+    chat_request = None
+
     try:
         # Step 1: Classify the task
         task_type = task_classifier.classify_task(request.message, request.context)
@@ -516,12 +520,14 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
         logger.error(f"Meta-orchestrator error: {type(e).__name__}: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        logger.error(f"Request details: service={best_service}, url={service_info['url']}, request={chat_request}")
+        logger.error(f"Request details: service={best_service}, url={service_info['url'] if service_info else None}, request={chat_request}")
         processing_time = time.time() - start_time
         return await _fallback_to_localllm(request, session_id, start_time)
 
 async def _fallback_to_localllm(request: MetaRequest, session_id: str, start_time: float) -> MetaResponse:
     """Fallback to local LLM when other services fail"""
+    chat_request = None
+
     try:
         chat_request = {
             "message": request.message,

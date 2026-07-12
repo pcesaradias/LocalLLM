@@ -79,9 +79,10 @@ class CodeAnalysisTool(BaseTool):
                 "prompt": prompt,
                 "stream": False,
                 "options": {"temperature": 0.3}
-            }
+            },
+            timeout=120
         )
-        
+
         if response.status_code == 200:
             return response.json().get("response", "Analysis failed")
         else:
@@ -115,7 +116,8 @@ class ResearchTool(BaseTool):
                 "prompt": prompt,
                 "stream": False,
                 "options": {"temperature": 0.5}
-            }
+            },
+            timeout=120
         )
         
         if response.status_code == 200:
@@ -132,15 +134,35 @@ tools = [
     ResearchTool(),
 ]
 
-# Initialize memory and agent
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+# Per-conversation memory cache. Isolates each conversation's buffer so users'
+# histories never bleed into one another. FIFO-evicted once it exceeds the cap.
+_MAX_CONVERSATIONS = 1000
+_conversation_memories: dict[str, ConversationBufferMemory] = {}
+
+def _new_memory() -> ConversationBufferMemory:
+    return ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+def get_conversation_memory(conversation_id: str) -> ConversationBufferMemory:
+    """Return the memory for a conversation, creating it if absent.
+
+    Evicts the oldest conversation (FIFO) once the cache exceeds _MAX_CONVERSATIONS.
+    """
+    memory = _conversation_memories.get(conversation_id)
+    if memory is None:
+        if len(_conversation_memories) >= _MAX_CONVERSATIONS:
+            oldest_id = next(iter(_conversation_memories))
+            del _conversation_memories[oldest_id]
+        memory = _new_memory()
+        _conversation_memories[conversation_id] = memory
+    return memory
 
 def get_best_model_for_task(task_type: str) -> str:
     """Get the best model for a specific task type using the model manager"""
     try:
         response = requests.get(
             f"{model_manager_url}/recommend-model",
-            params={"task_type": task_type}
+            params={"task_type": task_type},
+            timeout=30
         )
         if response.status_code == 200:
             result = response.json()
@@ -159,15 +181,16 @@ llm = Ollama(
     temperature=0.7,
 )
 
-# Create the agent
-agent = initialize_agent(
-    tools,
-    llm,
-    agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-    memory=memory,
-    verbose=True,
-    handle_parsing_errors=True,
-)
+# Build a conversational agent bound to the given per-conversation memory
+def create_agent(memory: ConversationBufferMemory):
+    return initialize_agent(
+        tools,
+        llm,
+        agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
+        memory=memory,
+        verbose=True,
+        handle_parsing_errors=True,
+    )
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
@@ -181,6 +204,14 @@ async def chat_endpoint(request: ChatRequest):
             logger.info("Returning cached response")
             return ChatResponse(**json.loads(cached_response))
         
+        # Resolve per-conversation memory so buffers never bleed across users;
+        # fall back to ephemeral memory when no conversation_id is provided.
+        if request.conversation_id:
+            memory = get_conversation_memory(request.conversation_id)
+        else:
+            memory = _new_memory()
+        agent = create_agent(memory)
+
         # Use the agent for enhanced reasoning
         response = agent.run(input=request.message)
         
@@ -236,7 +267,8 @@ async def reflect_endpoint(request: ReflectionRequest):
                 "prompt": reflection_prompt,
                 "stream": False,
                 "options": {"temperature": 0.3}
-            }
+            },
+            timeout=120
         )
         
         if response.status_code == 200:
@@ -280,7 +312,7 @@ async def health_check():
 async def list_models():
     """List available models"""
     try:
-        response = requests.get(f"{ollama_base_url}/api/tags")
+        response = requests.get(f"{ollama_base_url}/api/tags", timeout=30)
         if response.status_code == 200:
             return response.json()
         else:

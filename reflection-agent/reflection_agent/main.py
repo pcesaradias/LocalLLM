@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 import requests
 import logging
@@ -32,7 +33,7 @@ async def health_check():
 
 @app.get("/metrics")
 async def metrics():
-    return generate_latest()
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/reflect", response_model=ReflectionResponse)
 @reflection_duration.time()

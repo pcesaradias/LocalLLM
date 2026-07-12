@@ -23,6 +23,9 @@ redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:63
 ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 multimodal_model = os.getenv("MULTIMODAL_MODEL", "qwen2.5-vl:7b")
 
+# Maximum allowed size for uploaded images (10 MB)
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
 class MultimodalRequest(BaseModel):
     message: str
     image_data: Optional[str] = None  # base64 encoded image
@@ -206,7 +209,7 @@ async def analyze_image_endpoint(request: MultimodalRequest):
         analysis_result = image_analyzer.analyze_image(request.image_data, request.message)
         
         # Extract objects (simplified - in production would use object detection)
-        objects_detected = self._extract_objects_from_analysis(analysis_result)
+        objects_detected = _extract_objects_from_analysis(analysis_result)
         
         result = MultimodalResponse(
             response=analysis_result,
@@ -260,7 +263,7 @@ async def analyze_document_endpoint(request: DocumentAnalysisRequest):
         
         return DocumentAnalysisResponse(
             extracted_text=result["content"],
-            structured_data=self._structure_extracted_data(result["content"]),
+            structured_data=_structure_extracted_data(result["content"]),
             analysis_summary=f"Document analyzed using {request.analysis_type}",
             confidence=result["confidence"]
         )
@@ -275,6 +278,8 @@ async def upload_image(file: UploadFile = File(...)):
     try:
         # Read and encode image
         image_data = await file.read()
+        if len(image_data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Image exceeds 10MB limit")
         base64_image = base64.b64encode(image_data).decode('utf-8')
         
         return {
@@ -283,7 +288,9 @@ async def upload_image(file: UploadFile = File(...)):
             "size": len(image_data),
             "message": "Image uploaded successfully"
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Image upload error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
