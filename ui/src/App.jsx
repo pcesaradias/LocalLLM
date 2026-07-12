@@ -1,538 +1,919 @@
-import React, { useState, useEffect } from 'react'
-import axios from 'axios'
-import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
+import {
+  BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer
+} from 'recharts'
 import './App.css'
 
+// --- Persistence keys -------------------------------------------------------
+const LS_API_KEY = 'localllm_api_key'
+const LS_API_BASE = 'localllm_api_base'
+const LS_THEME = 'localllm_theme'
+const LS_MODEL = 'localllm_model'
+
+const CHART_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7']
+
+// API base URL is resolved at RUNTIME in the browser (not a build-time env var),
+// so a statically-served production build talks to the API on the same host.
+function defaultApiBase() {
+  const host = window.location.hostname || 'localhost'
+  return `http://${host}:8080`
+}
+
+function resolveInitialTheme() {
+  const stored = localStorage.getItem(LS_THEME)
+  if (stored === 'light' || stored === 'dark') return stored
+  const prefersDark = window.matchMedia &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+  return prefersDark ? 'dark' : 'light'
+}
+
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
+  // --- Core config (persisted) ---------------------------------------------
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(LS_API_KEY) || '')
+  const [apiBase, setApiBase] = useState(
+    () => localStorage.getItem(LS_API_BASE) || defaultApiBase()
+  )
+  const [theme, setTheme] = useState(resolveInitialTheme)
+
+  const authed = !!apiKey
+
+  // --- UI state -------------------------------------------------------------
   const [activeTab, setActiveTab] = useState('chat')
-  const [apiKey, setApiKey] = useState('')
-  const [message, setMessage] = useState('')
-  const [response, setResponse] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [models, setModels] = useState([])
-  const [selectedModel, setSelectedModel] = useState('qwen3-coder:latest')
+  const [toasts, setToasts] = useState([])
   const [healthStatus, setHealthStatus] = useState(null)
-  const [currentApiKey, setCurrentApiKey] = useState('')
-  const [stats, setStats] = useState(null)
+
+  // --- Chat state -----------------------------------------------------------
+  const [message, setMessage] = useState('')
+  const [lastPrompt, setLastPrompt] = useState('')
+  const [response, setResponse] = useState('')
+  const [chatMeta, setChatMeta] = useState(null)
+  const [chatError, setChatError] = useState('')
+  const [isSending, setIsSending] = useState(false)
+  const [models, setModels] = useState([])
+  const [selectedModel, setSelectedModel] = useState(
+    () => localStorage.getItem(LS_MODEL) || ''
+  )
+
+  // --- Models tab state -----------------------------------------------------
   const [showPullDialog, setShowPullDialog] = useState(false)
   const [pullModelName, setPullModelName] = useState('')
-  const [isModelLoading, setIsModelLoading] = useState(false)
-  const [modelMessage, setModelMessage] = useState('')
+  const [modelBusy, setModelBusy] = useState(false)
+  const [modelMessage, setModelMessage] = useState(null) // {type, text}
 
-  // Set up axios interceptor for API key
+  // --- Analytics state ------------------------------------------------------
+  const [stats, setStats] = useState(null)
+  const [statsError, setStatsError] = useState('')
+
+  // --- Settings state -------------------------------------------------------
+  const [baseDraft, setBaseDraft] = useState(apiBase)
+  const [keyDraft, setKeyDraft] = useState('')
+  const [rotatedKey, setRotatedKey] = useState('')
+  const [rotating, setRotating] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  // --- Gate state -----------------------------------------------------------
+  const [gateKey, setGateKey] = useState('')
+  const [gateBase, setGateBase] = useState(apiBase)
+  const [gateBusy, setGateBusy] = useState(false)
+
+  // Keep refs of current config so async streams read fresh values.
+  const apiBaseRef = useRef(apiBase)
+  const apiKeyRef = useRef(apiKey)
+  useEffect(() => { apiBaseRef.current = apiBase }, [apiBase])
+  useEffect(() => { apiKeyRef.current = apiKey }, [apiKey])
+
+  // --- Theme ----------------------------------------------------------------
   useEffect(() => {
-    const interceptor = axios.interceptors.request.use((config) => {
-      if (apiKey) {
-        config.headers.Authorization = `Bearer ${apiKey}`
-      }
-      return config
-    })
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem(LS_THEME, theme)
+  }, [theme])
 
-    return () => axios.interceptors.request.eject(interceptor)
-  }, [apiKey])
+  const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
 
-  // Simple authentication check
-  const handleLogin = (e) => {
-    e.preventDefault()
-    // TODO: Implement proper backend authentication
-    // For now, this is a demo-only UI with no real security
-    // DO NOT USE IN PRODUCTION without proper backend auth
-    if (username && password) {
-      // In production, this should call your backend API for authentication
-      setIsAuthenticated(true)
-    } else {
-      alert('Please enter username and password')
+  // --- Toasts ---------------------------------------------------------------
+  const showToast = useCallback((type, text) => {
+    const id = Date.now() + Math.random()
+    setToasts((prev) => [...prev, { id, type, text }])
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id))
+    }, 5000)
+  }, [])
+
+  const dismissToast = (id) =>
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+
+  // --- Low-level API helpers -----------------------------------------------
+  const buildHeaders = useCallback((withJson) => {
+    const headers = {}
+    if (withJson) headers['Content-Type'] = 'application/json'
+    if (apiKeyRef.current) headers.Authorization = `Bearer ${apiKeyRef.current}`
+    return headers
+  }, [])
+
+  const extractError = async (res) => {
+    let detail = res.statusText || `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      detail = data.detail || data.message || detail
+    } catch {
+      /* body was not JSON */
     }
+    return `${res.status}: ${detail}`
   }
 
-  // Auto-login for testing (remove in production)
-  useEffect(() => {
-    // Check if we're in development mode or if user wants auto-login
-    const urlParams = new URLSearchParams(window.location.search)
-    if (urlParams.get('autologin') === 'true') {
-      setIsAuthenticated(true)
+  // Generic JSON request against the configured base URL.
+  const apiRequest = useCallback(async (path, { method = 'GET', body } = {}) => {
+    const res = await fetch(apiBaseRef.current + path, {
+      method,
+      headers: buildHeaders(!!body),
+      body: body ? JSON.stringify(body) : undefined
+    })
+    if (!res.ok) throw new Error(await extractError(res))
+    const ctype = res.headers.get('content-type') || ''
+    return ctype.includes('application/json') ? res.json() : res.text()
+  }, [buildHeaders])
+
+  // --- Data loaders ---------------------------------------------------------
+  const loadHealth = useCallback(async (base) => {
+    try {
+      const res = await fetch((base || apiBaseRef.current) + '/health')
+      if (!res.ok) throw new Error(await extractError(res))
+      setHealthStatus(await res.json())
+      return true
+    } catch (err) {
+      setHealthStatus({ status: 'unreachable', error: err.message })
+      return false
     }
   }, [])
 
-  // Load initial data
+  const loadModels = useCallback(async () => {
+    try {
+      const data = await apiRequest('/models')
+      const list = data.models || []
+      setModels(list)
+      setSelectedModel((prev) => {
+        if (prev && list.some((m) => m.name === prev)) return prev
+        return list.length ? list[0].name : ''
+      })
+    } catch (err) {
+      showToast('error', `Failed to load models — ${err.message}`)
+    }
+  }, [apiRequest, showToast])
+
+  const loadStats = useCallback(async () => {
+    try {
+      const data = await apiRequest('/admin/stats')
+      setStats(data)
+      setStatsError('')
+    } catch (err) {
+      setStatsError(err.message)
+    }
+  }, [apiRequest])
+
+  // Persist selected model.
   useEffect(() => {
-    if (isAuthenticated) {
-      loadHealthStatus()
+    if (selectedModel) localStorage.setItem(LS_MODEL, selectedModel)
+  }, [selectedModel])
+
+  // Health check on mount and whenever base URL changes.
+  useEffect(() => {
+    loadHealth(apiBase)
+  }, [apiBase, loadHealth])
+
+  // Load authenticated data once a key is present.
+  useEffect(() => {
+    if (authed) {
       loadModels()
-      loadCurrentApiKey()
       loadStats()
     }
-  }, [isAuthenticated])
+  }, [authed, apiBase, loadModels, loadStats])
 
-  // Auto-refresh stats when Analytics tab is active
+  // Auto-refresh analytics while the tab is visible.
   useEffect(() => {
-    if (isAuthenticated && activeTab === 'analytics') {
-      const interval = setInterval(loadStats, 30000) // 30 seconds
-      return () => clearInterval(interval)
+    if (!authed || activeTab !== 'analytics') return
+    const id = setInterval(loadStats, 30000)
+    return () => clearInterval(id)
+  }, [authed, activeTab, loadStats])
+
+  // --- Chat / streaming -----------------------------------------------------
+  // Streams /chat/stream, invoking onChunk with the accumulated text.
+  // Handles both SSE (text/event-stream) and plain chunked responses.
+  const streamChat = useCallback(async (payload, onChunk) => {
+    const res = await fetch(apiBaseRef.current + '/chat/stream', {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) throw new Error(await extractError(res))
+    if (!res.body) throw new Error('Streaming not supported by this browser')
+
+    const isSSE = (res.headers.get('content-type') || '').includes('text/event-stream')
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let acc = ''
+    let buffer = ''
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const text = decoder.decode(value, { stream: true })
+
+      if (isSSE) {
+        buffer += text
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() || ''
+        for (const frame of frames) {
+          for (const line of frame.split('\n')) {
+            const trimmed = line.trimStart()
+            if (!trimmed.startsWith('data:')) continue
+            const data = trimmed.slice(5).replace(/^ /, '')
+            if (data === '[DONE]') continue
+            acc += data
+            onChunk(acc)
+          }
+        }
+      } else {
+        acc += text
+        onChunk(acc)
+      }
     }
-  }, [isAuthenticated, activeTab])
-
-  const loadHealthStatus = async () => {
-    try {
-      const response = await axios.get('/api/health')
-      setHealthStatus(response.data)
-    } catch (error) {
-      setHealthStatus({ status: 'unhealthy', error: error.message })
-    }
-  }
-
-  const loadModels = async () => {
-    try {
-      const response = await axios.get('/api/models')
-      setModels(response.data.models || [])
-    } catch (error) {
-      console.error('Failed to load models:', error)
-    }
-  }
-
-  const loadCurrentApiKey = async () => {
-    try {
-      const response = await axios.get('/api/admin/current-key')
-      setCurrentApiKey(response.data.current_api_key)
-    } catch (error) {
-      console.error('Failed to load API key:', error)
-    }
-  }
-
-  const generateNewApiKey = async () => {
-    try {
-      const response = await axios.get('/api/admin/generate-key')
-      setCurrentApiKey(response.data.api_key)
-      setApiKey(response.data.api_key)
-      alert('New API key generated! Make sure to save it.')
-    } catch (error) {
-      alert('Failed to generate API key: ' + error.message)
-    }
-  }
-
-  const loadStats = async () => {
-    try {
-      const response = await axios.get('/api/admin/stats')
-      setStats(response.data)
-    } catch (error) {
-      console.error('Failed to load stats:', error)
-    }
-  }
-
-  const pullModel = async () => {
-    if (!pullModelName.trim()) {
-      alert('Please enter a model name')
-      return
-    }
-
-    setIsModelLoading(true)
-    setModelMessage('Pulling model... This may take several minutes.')
-
-    try {
-      const response = await axios.post(`/api/admin/models/pull?model_name=${encodeURIComponent(pullModelName)}`)
-      setModelMessage(`Success: ${response.data.message}`)
-      setPullModelName('')
-      setShowPullDialog(false)
-      // Reload models after successful pull
-      setTimeout(() => {
-        loadModels()
-        setModelMessage('')
-      }, 2000)
-    } catch (error) {
-      setModelMessage(`Error: ${error.response?.data?.detail || error.message}`)
-    } finally {
-      setIsModelLoading(false)
-    }
-  }
-
-  const deleteModel = async (modelName) => {
-    if (!confirm(`Are you sure you want to delete ${modelName}? This cannot be undone.`)) {
-      return
-    }
-
-    setIsModelLoading(true)
-    setModelMessage(`Deleting ${modelName}...`)
-
-    try {
-      const response = await axios.delete(`/api/admin/models/${encodeURIComponent(modelName)}`)
-      setModelMessage(`Success: ${response.data.message}`)
-      // Reload models after successful delete
-      setTimeout(() => {
-        loadModels()
-        setModelMessage('')
-      }, 2000)
-    } catch (error) {
-      setModelMessage(`Error: ${error.response?.data?.detail || error.message}`)
-      setTimeout(() => setModelMessage(''), 3000)
-    } finally {
-      setIsModelLoading(false)
-    }
-  }
+    return acc
+  }, [buildHeaders])
 
   const sendMessage = async () => {
-    if (!message.trim()) return
+    const prompt = message.trim()
+    if (!prompt || isSending) return
+    if (!selectedModel) {
+      showToast('error', 'No model selected — pull a model first')
+      return
+    }
 
-    setIsLoading(true)
+    setIsSending(true)
+    setChatError('')
+    setChatMeta(null)
     setResponse('')
+    setLastPrompt(prompt)
 
+    const payload = {
+      message: prompt,
+      model: selectedModel,
+      temperature: 0.7,
+      max_tokens: 2048
+    }
+
+    let partial = ''
     try {
-      const requestData = {
-        message: message,
-        model: selectedModel,
-        temperature: 0.7,
-        max_tokens: 2048
-      }
-
-      const response = await axios.post('/api/chat', requestData)
-      setResponse(response.data.response)
+      await streamChat(payload, (acc) => {
+        partial = acc
+        setResponse(acc)
+      })
       setMessage('')
-    } catch (error) {
-      setResponse(`Error: ${error.response?.data?.detail || error.message}`)
+    } catch (streamErr) {
+      if (partial) {
+        // Stream started then broke — keep what we have, surface the break.
+        setChatError(`Stream interrupted — ${streamErr.message}`)
+        showToast('error', `Stream interrupted — ${streamErr.message}`)
+        setMessage('')
+      } else {
+        // Graceful fallback to the non-streaming endpoint.
+        try {
+          const data = await apiRequest('/chat', { method: 'POST', body: payload })
+          setResponse(data.response || '')
+          setChatMeta({
+            model: data.model,
+            tokens: data.tokens_used,
+            time: data.processing_time
+          })
+          setMessage('')
+        } catch (err) {
+          setChatError(err.message)
+          showToast('error', `Chat failed — ${err.message}`)
+        }
+      }
     } finally {
-      setIsLoading(false)
+      setIsSending(false)
     }
   }
 
-  const handleKeyPress = (e) => {
+  const handleChatKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
     }
   }
 
-  if (!isAuthenticated) {
+  // --- Models actions -------------------------------------------------------
+  const pullModel = async () => {
+    const name = pullModelName.trim()
+    if (!name) return
+    setModelBusy(true)
+    setModelMessage({ type: 'info', text: `Pulling ${name}… this may take a while.` })
+    try {
+      await apiRequest(`/admin/models/pull?model_name=${encodeURIComponent(name)}`, {
+        method: 'POST'
+      })
+      setModelMessage({ type: 'success', text: `Pulled ${name}.` })
+      setPullModelName('')
+      setShowPullDialog(false)
+      await loadModels()
+      setTimeout(() => setModelMessage(null), 4000)
+    } catch (err) {
+      setModelMessage({ type: 'error', text: `Pull failed — ${err.message}` })
+    } finally {
+      setModelBusy(false)
+    }
+  }
+
+  const deleteModel = async (name) => {
+    if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return
+    setModelBusy(true)
+    setModelMessage({ type: 'info', text: `Deleting ${name}…` })
+    try {
+      await apiRequest(`/admin/models/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      setModelMessage({ type: 'success', text: `Deleted ${name}.` })
+      await loadModels()
+      setTimeout(() => setModelMessage(null), 4000)
+    } catch (err) {
+      setModelMessage({ type: 'error', text: `Delete failed — ${err.message}` })
+      setTimeout(() => setModelMessage(null), 5000)
+    } finally {
+      setModelBusy(false)
+    }
+  }
+
+  // --- Settings actions -----------------------------------------------------
+  const saveBaseUrl = () => {
+    const next = baseDraft.trim().replace(/\/+$/, '')
+    if (!next) {
+      showToast('error', 'API base URL cannot be empty')
+      return
+    }
+    localStorage.setItem(LS_API_BASE, next)
+    setApiBase(next)
+    showToast('success', 'API base URL saved')
+  }
+
+  const resetBaseUrl = () => {
+    localStorage.removeItem(LS_API_BASE)
+    const next = defaultApiBase()
+    setApiBase(next)
+    setBaseDraft(next)
+    showToast('success', 'API base URL reset to default')
+  }
+
+  const updateSessionKey = () => {
+    const next = keyDraft.trim()
+    if (!next) {
+      showToast('error', 'API key cannot be empty')
+      return
+    }
+    localStorage.setItem(LS_API_KEY, next)
+    setApiKey(next)
+    setKeyDraft('')
+    showToast('success', 'Session API key updated')
+  }
+
+  const rotateKey = async () => {
+    if (!window.confirm(
+      'Rotate the API key? The current key stops working immediately. ' +
+      'Save the new key to your .env or you will be locked out.'
+    )) return
+    setRotating(true)
+    setRotatedKey('')
+    setCopied(false)
+    try {
+      const data = await apiRequest('/admin/rotate-key', { method: 'POST' })
+      const newKey = data.api_key
+      if (!newKey) throw new Error('Response did not include api_key')
+      // Adopt the new key for this session so the app keeps working.
+      localStorage.setItem(LS_API_KEY, newKey)
+      setApiKey(newKey)
+      setRotatedKey(newKey)
+      showToast('success', 'API key rotated — save the new key now')
+    } catch (err) {
+      showToast('error', `Rotation failed — ${err.message}`)
+    } finally {
+      setRotating(false)
+    }
+  }
+
+  const copyKey = async () => {
+    try {
+      await navigator.clipboard.writeText(rotatedKey)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      showToast('error', 'Clipboard unavailable — copy the key manually')
+    }
+  }
+
+  // --- Gate / auth ----------------------------------------------------------
+  const enterWithKey = async (e) => {
+    e.preventDefault()
+    const key = gateKey.trim()
+    const base = gateBase.trim().replace(/\/+$/, '')
+    if (!key) return
+    setGateBusy(true)
+    if (base && base !== apiBase) {
+      localStorage.setItem(LS_API_BASE, base)
+      setApiBase(base)
+      apiBaseRef.current = base
+    }
+    // Validate the key against an authenticated endpoint before entering.
+    apiKeyRef.current = key
+    try {
+      const res = await fetch(apiBaseRef.current + '/models', {
+        headers: { Authorization: `Bearer ${key}` }
+      })
+      if (res.status === 401 || res.status === 403) {
+        apiKeyRef.current = apiKey
+        showToast('error', 'That API key was rejected by the server')
+        setGateBusy(false)
+        return
+      }
+      // Any non-auth response (including reachable errors) means the key is accepted.
+    } catch (err) {
+      // Network failure: let the user in but warn — Settings can fix the base URL.
+      showToast('error', `Could not reach ${apiBaseRef.current} — check the base URL`)
+    }
+    localStorage.setItem(LS_API_KEY, key)
+    setApiKey(key)
+    setGateKey('')
+    setGateBusy(false)
+  }
+
+  const logout = () => {
+    localStorage.removeItem(LS_API_KEY)
+    setApiKey('')
+    apiKeyRef.current = ''
+    setModels([])
+    setStats(null)
+    setResponse('')
+    setLastPrompt('')
+    setRotatedKey('')
+    setActiveTab('chat')
+  }
+
+  const maskKey = (k) =>
+    k.length <= 8 ? '••••' : `${k.slice(0, 4)}${'•'.repeat(6)}${k.slice(-4)}`
+
+  // --- Shared UI fragments --------------------------------------------------
+  const themeToggle = (
+    <button
+      className="icon-button"
+      onClick={toggleTheme}
+      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+      aria-label="Toggle color theme"
+    >
+      {theme === 'dark' ? '☀' : '☾'}
+    </button>
+  )
+
+  const toastStack = (
+    <div className="toast-stack">
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast toast-${t.type}`} onClick={() => dismissToast(t.id)}>
+          <span>{t.text}</span>
+          <button className="toast-close" aria-label="Dismiss">×</button>
+        </div>
+      ))}
+    </div>
+  )
+
+  // --- Gate screen ----------------------------------------------------------
+  if (!authed) {
+    const status = healthStatus?.status
     return (
-      <div className="app">
-        <div className="login-container">
-          <div className="login-form">
+      <div className="gate">
+        {toastStack}
+        <div className="gate-card">
+          <div className="gate-brand">
+            <span className="logo-dot" />
             <h1>Local LLM Manager</h1>
-            <p>Please sign in to access the management interface</p>
-            <form onSubmit={handleLogin}>
-              <div className="form-group">
-                <label htmlFor="username">Username</label>
-                <input
-                  type="text"
-                  id="username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Enter username"
-                  className="login-input"
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="password">Password</label>
-                <input
-                  type="password"
-                  id="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter password"
-                  className="login-input"
-                />
-              </div>
-              <button type="submit" className="login-button">
-                Sign In
-              </button>
-            </form>
-            <div className="login-help">
-              <p><strong>Demo UI - No Real Authentication</strong></p>
-              <p>⚠️ This is a demonstration UI only</p>
-              <p>Enter any username and password to access</p>
-              <p><em>For testing: <a href="?autologin=true">Auto-login</a></em></p>
-              <p style={{fontSize: '0.8em', color: '#666'}}>
-                TODO: Implement proper backend authentication before production use
-              </p>
-            </div>
+          </div>
+          <p className="gate-sub">
+            Enter your LocalLLM API key to continue. Find it in your server's
+            <code>.env</code> file.
+          </p>
+          <form onSubmit={enterWithKey}>
+            <label className="field-label" htmlFor="gate-key">API key</label>
+            <input
+              id="gate-key"
+              type="password"
+              className="input"
+              value={gateKey}
+              onChange={(e) => setGateKey(e.target.value)}
+              placeholder="Paste your API key"
+              autoFocus
+            />
+            <label className="field-label" htmlFor="gate-base">API base URL</label>
+            <input
+              id="gate-base"
+              type="text"
+              className="input"
+              value={gateBase}
+              onChange={(e) => setGateBase(e.target.value)}
+              placeholder="http://host:8080"
+            />
+            <button type="submit" className="btn btn-primary btn-block" disabled={gateBusy || !gateKey.trim()}>
+              {gateBusy ? 'Checking…' : 'Enter'}
+            </button>
+          </form>
+          <div className="gate-foot">
+            <span className={`status-pill status-${status || 'unknown'}`}>
+              {status ? `Server: ${status}` : 'Server: checking…'}
+            </span>
+            {themeToggle}
           </div>
         </div>
       </div>
     )
   }
 
+  // --- Authenticated app ----------------------------------------------------
+  const tabs = [
+    ['chat', 'Chat'],
+    ['models', 'Models'],
+    ['analytics', 'Analytics'],
+    ['settings', 'Settings']
+  ]
+
+  const health = healthStatus?.status || 'unknown'
+  const cacheRatio = typeof stats?.cache_hit_ratio === 'number' ? stats.cache_hit_ratio : 0
+  const redisHits = stats?.redis_hits ?? 0
+  const redisMisses = stats?.redis_misses ?? 0
+  const endpointData = Object.entries(stats?.requests_by_endpoint || {})
+    .map(([name, count]) => ({ name, count }))
+  const topModels = Array.isArray(stats?.top_models) ? stats.top_models : []
+
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>Local LLM Manager</h1>
-        <div className="header-right">
-          <div className="health-status">
-            Status: <span className={`status ${healthStatus?.status || 'unknown'}`}>
-              {healthStatus?.status || 'Loading...'}
-            </span>
-            {healthStatus?.models_loaded && (
-              <span className="models-count">({healthStatus.models_loaded} models)</span>
-            )}
-          </div>
-          <button 
-            onClick={() => setIsAuthenticated(false)}
-            className="logout-button"
-          >
-            Logout
-          </button>
+      {toastStack}
+
+      <header className="topbar">
+        <div className="topbar-left">
+          <span className="logo-dot" />
+          <h1>Local LLM Manager</h1>
+        </div>
+        <div className="topbar-right">
+          <span className={`status-pill status-${health}`}>
+            {health}
+            {healthStatus?.models_loaded != null && ` · ${healthStatus.models_loaded} models`}
+          </span>
+          {themeToggle}
+          <button className="btn btn-ghost" onClick={logout}>Logout</button>
         </div>
       </header>
 
-      <nav className="tabs">
-        <button 
-          className={activeTab === 'chat' ? 'active' : ''} 
-          onClick={() => setActiveTab('chat')}
-        >
-          Chat
-        </button>
-        <button 
-          className={activeTab === 'models' ? 'active' : ''} 
-          onClick={() => setActiveTab('models')}
-        >
-          Models
-        </button>
-        <button
-          className={activeTab === 'settings' ? 'active' : ''}
-          onClick={() => setActiveTab('settings')}
-        >
-          Settings
-        </button>
-        <button
-          className={activeTab === 'analytics' ? 'active' : ''}
-          onClick={() => setActiveTab('analytics')}
-        >
-          Analytics
-        </button>
+      <nav className="tabs" role="tablist">
+        {tabs.map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={activeTab === id}
+            className={activeTab === id ? 'tab active' : 'tab'}
+            onClick={() => setActiveTab(id)}
+          >
+            {label}
+          </button>
+        ))}
       </nav>
 
-      <main className="main-content">
+      <main className="content">
+        {/* ---------------- Chat ---------------- */}
         {activeTab === 'chat' && (
-          <div className="chat-container">
-            <div className="chat-controls">
-              <select 
-                value={selectedModel} 
+          <section className="card">
+            <div className="chat-toolbar">
+              <label className="field-label" htmlFor="chat-model">Model</label>
+              <select
+                id="chat-model"
+                className="select"
+                value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                className="model-select"
               >
-                {models.map(model => (
-                  <option key={model.name} value={model.name}>
-                    {model.name} ({model.size})
+                {models.length === 0 && <option value="">No models available</option>}
+                {models.map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {m.name}{m.size ? ` (${m.size})` : ''}
                   </option>
                 ))}
               </select>
             </div>
 
-            <div className="chat-messages">
-              {response && (
-                <div className="message response">
-                  <strong>Assistant:</strong>
-                  <div className="message-content">{response}</div>
+            <div className="chat-thread">
+              {!lastPrompt && !response && (
+                <div className="empty-state">Ask the model anything to get started.</div>
+              )}
+              {lastPrompt && (
+                <div className="bubble bubble-user">
+                  <div className="bubble-role">You</div>
+                  <div className="bubble-body">{lastPrompt}</div>
                 </div>
               )}
+              {(response || isSending) && (
+                <div className="bubble bubble-assistant">
+                  <div className="bubble-role">Assistant</div>
+                  <div className="bubble-body">
+                    {response || <span className="typing">…</span>}
+                  </div>
+                  {chatMeta && (
+                    <div className="bubble-meta">
+                      {chatMeta.model && <span>{chatMeta.model}</span>}
+                      {chatMeta.tokens != null && <span>{chatMeta.tokens} tokens</span>}
+                      {chatMeta.time != null && <span>{chatMeta.time}s</span>}
+                    </div>
+                  )}
+                </div>
+              )}
+              {chatError && <div className="inline-error">{chatError}</div>}
             </div>
 
             <div className="chat-input">
               <textarea
+                className="textarea"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Type your message here... (Press Enter to send)"
-                disabled={isLoading}
-                rows="3"
+                onKeyDown={handleChatKey}
+                placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+                disabled={isSending}
+                rows={3}
               />
-              <button 
-                onClick={sendMessage} 
-                disabled={isLoading || !message.trim()}
-                className="send-button"
+              <button
+                className="btn btn-primary send-btn"
+                onClick={sendMessage}
+                disabled={isSending || !message.trim()}
               >
-                {isLoading ? 'Sending...' : 'Send'}
+                {isSending ? 'Sending…' : 'Send'}
               </button>
             </div>
-          </div>
+          </section>
         )}
 
+        {/* ---------------- Models ---------------- */}
         {activeTab === 'models' && (
-          <div className="models-container">
-            <div className="models-header">
-              <h2>Available Models</h2>
+          <section className="card">
+            <div className="section-head">
+              <h2>Models</h2>
               <button
+                className="btn btn-primary"
                 onClick={() => setShowPullDialog(true)}
-                className="pull-model-button"
-                disabled={isModelLoading}
+                disabled={modelBusy}
               >
-                Pull Model
+                Pull model
               </button>
             </div>
 
             {modelMessage && (
-              <div className={`model-message ${modelMessage.includes('Error') ? 'error' : 'success'}`}>
-                {modelMessage}
+              <div className={`inline-banner banner-${modelMessage.type}`}>
+                {modelMessage.text}
               </div>
             )}
 
-            <div className="models-list">
-              {models.map(model => (
-                <div key={model.name} className="model-card">
-                  <h3>{model.name}</h3>
-                  <p>Size: {model.size}</p>
-                  <p>Status: <span className="status available">{model.status}</span></p>
-                  <p>Modified: {model.modified}</p>
-                  <button
-                    onClick={() => deleteModel(model.name)}
-                    className="delete-model-button"
-                    disabled={isModelLoading}
-                  >
-                    Delete
-                  </button>
-                </div>
-              ))}
-            </div>
+            {models.length === 0 ? (
+              <div className="empty-state">No models installed. Pull one to begin.</div>
+            ) : (
+              <div className="model-grid">
+                {models.map((m) => (
+                  <div key={m.name} className="model-card">
+                    <div className="model-card-head">
+                      <h3>{m.name}</h3>
+                      {m.status && <span className="status-pill status-healthy">{m.status}</span>}
+                    </div>
+                    <dl className="model-meta">
+                      {m.size && (<><dt>Size</dt><dd>{m.size}</dd></>)}
+                      {m.modified && (<><dt>Modified</dt><dd>{m.modified}</dd></>)}
+                    </dl>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => deleteModel(m.name)}
+                      disabled={modelBusy}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {showPullDialog && (
-              <div className="modal-overlay" onClick={() => !isModelLoading && setShowPullDialog(false)}>
-                <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-                  <h3>Pull Model from Ollama Library</h3>
+              <div
+                className="modal-overlay"
+                onClick={() => !modelBusy && setShowPullDialog(false)}
+              >
+                <div className="modal" onClick={(e) => e.stopPropagation()}>
+                  <h3>Pull from Ollama library</h3>
+                  <p className="muted">
+                    Enter a model name such as <code>llama2:latest</code> or <code>tinyllama:latest</code>.
+                  </p>
                   <input
+                    className="input"
                     type="text"
                     value={pullModelName}
                     onChange={(e) => setPullModelName(e.target.value)}
-                    placeholder="Enter model name (e.g., llama2:latest, tinyllama:latest)"
-                    disabled={isModelLoading}
-                    onKeyPress={(e) => e.key === 'Enter' && pullModel()}
+                    placeholder="model:tag"
+                    disabled={modelBusy}
+                    autoFocus
+                    onKeyDown={(e) => e.key === 'Enter' && pullModel()}
                   />
-                  <div className="modal-buttons">
+                  <div className="modal-actions">
                     <button
-                      onClick={pullModel}
-                      disabled={isModelLoading || !pullModelName.trim()}
-                      className="pull-button"
-                    >
-                      {isModelLoading ? 'Pulling...' : 'Pull'}
-                    </button>
-                    <button
+                      className="btn btn-ghost"
                       onClick={() => setShowPullDialog(false)}
-                      disabled={isModelLoading}
-                      className="cancel-button"
+                      disabled={modelBusy}
                     >
                       Cancel
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={pullModel}
+                      disabled={modelBusy || !pullModelName.trim()}
+                    >
+                      {modelBusy ? 'Pulling…' : 'Pull'}
                     </button>
                   </div>
                 </div>
               </div>
             )}
-          </div>
+          </section>
         )}
 
-        {activeTab === 'settings' && (
-          <div className="settings-container">
-            <h2>API Settings</h2>
-            
-            <div className="api-key-section">
-              <h3>Current API Key</h3>
-              <div className="api-key-display">
-                <code>{currentApiKey || 'No API key generated'}</code>
-              </div>
-              <button onClick={generateNewApiKey} className="generate-key-btn">
-                Generate New API Key
-              </button>
-            </div>
-
-            <div className="api-key-input">
-              <h3>Set API Key for Current Session</h3>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Enter your API key here"
-                className="api-key-input-field"
-              />
-              <p className="help-text">
-                This key will be used for all API requests in this session
-              </p>
-            </div>
-
-            <div className="usage-instructions">
-              <h3>Usage Instructions</h3>
-              <p>Use the API key in the Authorization header:</p>
-              <code>Authorization: Bearer YOUR_API_KEY</code>
-            </div>
-          </div>
-        )}
-
+        {/* ---------------- Analytics ---------------- */}
         {activeTab === 'analytics' && (
-          <div className="analytics-container">
-            <h2>System Analytics</h2>
+          <section className="card">
+            <div className="section-head">
+              <h2>Analytics</h2>
+              <button className="btn btn-ghost" onClick={loadStats}>Refresh</button>
+            </div>
 
-            {stats ? (
+            {statsError && <div className="inline-error">{statsError}</div>}
+
+            {!stats && !statsError && <div className="empty-state">Loading analytics…</div>}
+
+            {stats && (
               <>
-                <div className="stats-cards">
+                <div className="stat-cards">
                   <div className="stat-card">
-                    <h3>Total Requests</h3>
-                    <div className="stat-value">{stats.total_requests}</div>
-                    <div className="stat-label">All time</div>
+                    <div className="stat-label">Total requests</div>
+                    <div className="stat-value">{stats.total_requests ?? 0}</div>
+                    <div className="stat-sub">All time</div>
                   </div>
                   <div className="stat-card">
-                    <h3>Avg Response Time</h3>
-                    <div className="stat-value">{stats.avg_response_time}s</div>
-                    <div className="stat-label">Per request</div>
+                    <div className="stat-label">Avg response time</div>
+                    <div className="stat-value">{stats.avg_response_time ?? 0}s</div>
+                    <div className="stat-sub">Per request</div>
                   </div>
                   <div className="stat-card">
-                    <h3>Cache Hit Ratio</h3>
-                    <div className="stat-value">{(stats.cache_hit_ratio * 100).toFixed(1)}%</div>
-                    <div className="stat-label">{stats.redis_hits} hits / {stats.redis_hits + stats.redis_misses} total</div>
+                    <div className="stat-label">Cache hit ratio</div>
+                    <div className="stat-value">{(cacheRatio * 100).toFixed(1)}%</div>
+                    <div className="stat-sub">{redisHits} / {redisHits + redisMisses} hits</div>
                   </div>
                   <div className="stat-card">
-                    <h3>Models Loaded</h3>
-                    <div className="stat-value">{stats.models_loaded}</div>
-                    <div className="stat-label">Available models</div>
+                    <div className="stat-label">Models loaded</div>
+                    <div className="stat-value">{stats.models_loaded ?? 0}</div>
+                    <div className="stat-sub">Available</div>
                   </div>
                 </div>
 
-                <div className="charts-grid">
-                  <div className="chart-container">
-                    <h3>Requests by Endpoint</h3>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart data={Object.entries(stats.requests_by_endpoint).map(([name, count]) => ({ name, count }))}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="name" />
-                        <YAxis />
-                        <Tooltip />
-                        <Legend />
-                        <Bar dataKey="count" fill="#8884d8" />
-                      </BarChart>
-                    </ResponsiveContainer>
+                <div className="chart-grid">
+                  <div className="chart-panel">
+                    <h3>Requests by endpoint</h3>
+                    {endpointData.length ? (
+                      <ResponsiveContainer width="100%" height={280}>
+                        <BarChart data={endpointData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                          <XAxis dataKey="name" tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
+                          <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 12 }} allowDecimals={false} />
+                          <Tooltip
+                            contentStyle={{
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 8,
+                              color: 'var(--text)'
+                            }}
+                          />
+                          <Bar dataKey="count" fill="#6366f1" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="empty-state">No endpoint data yet.</div>
+                    )}
                   </div>
 
-                  {stats.top_models && stats.top_models.length > 0 && (
-                    <div className="chart-container">
-                      <h3>Top Models by Usage</h3>
-                      <ResponsiveContainer width="100%" height={300}>
+                  <div className="chart-panel">
+                    <h3>Top models by usage</h3>
+                    {topModels.length ? (
+                      <ResponsiveContainer width="100%" height={280}>
                         <PieChart>
                           <Pie
-                            data={stats.top_models}
+                            data={topModels}
                             dataKey="count"
                             nameKey="model"
                             cx="50%"
                             cy="50%"
-                            outerRadius={80}
+                            outerRadius={90}
                             label
                           >
-                            {stats.top_models.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8'][index % 5]} />
+                            {topModels.map((entry, i) => (
+                              <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                             ))}
                           </Pie>
-                          <Tooltip />
+                          <Tooltip
+                            contentStyle={{
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 8,
+                              color: 'var(--text)'
+                            }}
+                          />
                           <Legend />
                         </PieChart>
                       </ResponsiveContainer>
-                    </div>
-                  )}
+                    ) : (
+                      <div className="empty-state">No model usage yet.</div>
+                    )}
+                  </div>
                 </div>
 
-                <div className="stats-footer">
-                  <p>Last updated: {new Date(stats.timestamp).toLocaleString()}</p>
-                  <button onClick={loadStats} className="refresh-button">Refresh Now</button>
-                </div>
+                {stats.timestamp && (
+                  <div className="stats-foot muted">
+                    Last updated: {new Date(stats.timestamp).toLocaleString()}
+                  </div>
+                )}
               </>
-            ) : (
-              <div className="loading">Loading analytics...</div>
             )}
-          </div>
+          </section>
+        )}
+
+        {/* ---------------- Settings ---------------- */}
+        {activeTab === 'settings' && (
+          <section className="card settings">
+            <h2>Settings</h2>
+
+            <div className="setting-block">
+              <h3>API base URL</h3>
+              <p className="muted">
+                Where the browser sends requests. Defaults to
+                <code>{defaultApiBase()}</code> (this host, port 8080).
+              </p>
+              <div className="field-row">
+                <input
+                  className="input"
+                  type="text"
+                  value={baseDraft}
+                  onChange={(e) => setBaseDraft(e.target.value)}
+                  placeholder="http://host:8080"
+                />
+                <button className="btn btn-primary" onClick={saveBaseUrl}>Save</button>
+                <button className="btn btn-ghost" onClick={resetBaseUrl}>Reset</button>
+              </div>
+              <p className="muted small">Active: <code>{apiBase}</code></p>
+            </div>
+
+            <div className="setting-block">
+              <h3>Session API key</h3>
+              <p className="muted">
+                Current key: <code>{maskKey(apiKey)}</code>. Replace it for this session below.
+              </p>
+              <div className="field-row">
+                <input
+                  className="input"
+                  type="password"
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                  placeholder="Enter a new API key"
+                />
+                <button className="btn btn-primary" onClick={updateSessionKey}>Update</button>
+              </div>
+            </div>
+
+            <div className="setting-block">
+              <h3>Rotate API key</h3>
+              <p className="muted">
+                Generates a brand-new key on the server and invalidates the current one.
+                This session adopts the new key automatically — but you must save it to your
+                server's <code>.env</code> or you will lose access on next restart.
+              </p>
+              <button className="btn btn-danger" onClick={rotateKey} disabled={rotating}>
+                {rotating ? 'Rotating…' : 'Rotate API key'}
+              </button>
+
+              {rotatedKey && (
+                <div className="rotated-key">
+                  <div className="rotated-warn">
+                    ⚠ Save this key now — it is shown only once.
+                  </div>
+                  <div className="rotated-row">
+                    <code className="rotated-value">{rotatedKey}</code>
+                    <button className="btn btn-ghost btn-sm" onClick={copyKey}>
+                      {copied ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
         )}
       </main>
     </div>
