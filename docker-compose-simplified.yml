@@ -40,6 +40,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOCALLLM_API_KEY=${LOCALLLM_API_KEY}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - MONITORING_PORT=8081
       - VECTOR_DB_URL=http://vector-db:8007
@@ -301,6 +302,7 @@ services:
     environment:
       - CHROMA_DB_PATH=/app/data/chromadb
       - EMBEDDING_MODEL=all-MiniLM-L6-v2
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
     volumes:
       - vector_db_data:/app/data/chromadb
     restart: unless-stopped

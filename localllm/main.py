@@ -61,6 +61,16 @@ redis_client = redis.Redis(
 # Long read timeout (LLM generation), short connect timeout to fail fast.
 _http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
 
+# If an API key is configured via env it is authoritative: seed it into Redis so
+# the operator's configured key works even if a random one was generated on an
+# earlier boot. (There is no open endpoint to read the key anymore.)
+_configured_api_key = os.getenv("LOCALLLM_API_KEY")
+if _configured_api_key:
+    try:
+        redis_client.set("localllm:api_key", _configured_api_key)
+    except Exception as e:
+        logger.warning(f"Could not seed configured API key into Redis: {e}")
+
 # Vector DB configuration
 VECTOR_DB_URL = os.getenv("VECTOR_DB_URL", "http://vector-db:8007")
 
