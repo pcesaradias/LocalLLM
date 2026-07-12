@@ -230,8 +230,21 @@ function App() {
             if (!trimmed.startsWith('data:')) continue
             const data = trimmed.slice(5).replace(/^ /, '')
             if (data === '[DONE]') continue
-            acc += data
-            onChunk(acc)
+            // Each frame is a JSON object: localllm emits {"token","done"},
+            // OpenAI-style emits {"choices":[{"delta":{"content"}}]}. Extract
+            // the text; fall back to the raw string if it isn't JSON.
+            let piece = data
+            try {
+              const obj = JSON.parse(data)
+              if (obj.done) continue
+              piece = obj.token ?? obj.choices?.[0]?.delta?.content ?? ''
+            } catch {
+              // not JSON — treat as raw text chunk
+            }
+            if (piece) {
+              acc += piece
+              onChunk(acc)
+            }
           }
         }
       } else {

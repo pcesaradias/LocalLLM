@@ -1061,6 +1061,16 @@ Respond in JSON format:
 async def list_models(api_key: str = Depends(verify_api_key)):
     REQUEST_COUNT.labels(method="GET", endpoint="/models").inc()
     try:
+        # With the openai backend, list models from the provider's /v1/models
+        # (the local available_models cache is only populated for Ollama).
+        if inference.backend() == "openai":
+            provider_models = await inference.list_models(_http)
+            return {"models": [
+                ModelInfo(name=str(m["name"]), size=str(m.get("size", "n/a")),
+                          modified=str(m.get("modified", "n/a")), status="available")
+                for m in provider_models
+            ]}
+
         models_list = []
         for name, model in llm_service.available_models.items():
             # Debug: print what we're processing

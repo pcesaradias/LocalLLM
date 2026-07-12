@@ -4,6 +4,7 @@ from internal_auth import require_internal_key, internal_headers
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import requests
+import inference
 import json
 import redis
 import os
@@ -65,7 +66,6 @@ class ReflectionResponse(BaseModel):
     confidence_score: float
 
 # Custom tools for the agent
-# TODO: still calls Ollama directly via requests; not switched by INFERENCE_BACKEND (follow-up).
 class CodeAnalysisTool(BaseTool):
     name = "code_analyzer"
     description = "Analyzes code for bugs, performance issues, and best practices"
@@ -87,26 +87,15 @@ class CodeAnalysisTool(BaseTool):
         Provide detailed feedback in a structured format.
         """
         
-        response = requests.post(
-            f"{ollama_base_url}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.3}
-            },
-            timeout=120
-        )
-
-        if response.status_code == 200:
-            return response.json().get("response", "Analysis failed")
-        else:
-            return f"Error analyzing code: {response.status_code}"
+        try:
+            result = inference.generate_sync(model_name, prompt, temperature=0.3, timeout=120)
+            return result
+        except Exception as e:
+            return f"Error analyzing code: {str(e)}"
 
     async def _arun(self, code: str) -> str:
         return self._run(code)
 
-# TODO: still calls Ollama directly via requests; not switched by INFERENCE_BACKEND (follow-up).
 class ResearchTool(BaseTool):
     name = "researcher"
     description = "Researches topics and provides detailed information"
@@ -125,21 +114,11 @@ class ResearchTool(BaseTool):
         Provide well-structured, detailed information.
         """
         
-        response = requests.post(
-            f"{ollama_base_url}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.5}
-            },
-            timeout=120
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("response", "Research failed")
-        else:
-            return f"Error researching: {response.status_code}"
+        try:
+            result = inference.generate_sync(model_name, prompt, temperature=0.5, timeout=120)
+            return result
+        except Exception as e:
+            return f"Error researching: {str(e)}"
 
     async def _arun(self, topic: str) -> str:
         return self._run(topic)
@@ -288,46 +267,33 @@ async def reflect_endpoint(request: ReflectionRequest, _auth: bool = Depends(req
         CONFIDENCE: [confidence score]
         """
         
-        response = await run_in_threadpool(
-            requests.post,
-            f"{ollama_base_url}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": reflection_prompt,
-                "stream": False,
-                "options": {"temperature": 0.3}
-            },
-            timeout=120
+        reflection_text = await run_in_threadpool(
+            inference.generate_sync, model_name, reflection_prompt, 0.3, None, 120
         )
 
-        if response.status_code == 200:
-            reflection_text = response.json().get("response", "")
-            
-            # Parse the reflection response
-            lines = reflection_text.split('\n')
-            critique = ""
-            improved_response = ""
-            confidence = 0.7  # default
-            
-            for line in lines:
-                if line.startswith("CRITIQUE:"):
-                    critique = line.replace("CRITIQUE:", "").strip()
-                elif line.startswith("IMPROVED_RESPONSE:"):
-                    improved_response = line.replace("IMPROVED_RESPONSE:", "").strip()
-                elif line.startswith("CONFIDENCE:"):
-                    try:
-                        confidence = float(line.replace("CONFIDENCE:", "").strip())
-                    except ValueError:
-                        confidence = 0.7
-            
-            return ReflectionResponse(
-                improved_response=improved_response or reflection_text,
-                reflection_notes=critique,
-                confidence_score=confidence
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Reflection failed")
-            
+        # Parse the reflection response
+        lines = reflection_text.split('\n')
+        critique = ""
+        improved_response = ""
+        confidence = 0.7  # default
+
+        for line in lines:
+            if line.startswith("CRITIQUE:"):
+                critique = line.replace("CRITIQUE:", "").strip()
+            elif line.startswith("IMPROVED_RESPONSE:"):
+                improved_response = line.replace("IMPROVED_RESPONSE:", "").strip()
+            elif line.startswith("CONFIDENCE:"):
+                try:
+                    confidence = float(line.replace("CONFIDENCE:", "").strip())
+                except ValueError:
+                    confidence = 0.7
+
+        return ReflectionResponse(
+            improved_response=improved_response or reflection_text,
+            reflection_notes=critique,
+            confidence_score=confidence
+        )
+
     except Exception as e:
         logger.error(f"Error in reflection endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
