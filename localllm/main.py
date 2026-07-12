@@ -24,6 +24,7 @@ import httpx
 import sys
 sys.path.append("/app")
 from localllm.cache_utils import PromptCacheManager
+from localllm import inference
 from internal_auth import internal_headers
 from starlette.concurrency import run_in_threadpool
 
@@ -173,6 +174,14 @@ class EnhancedLLMService:
         
     def load_models(self):
         """Load available models from Ollama"""
+        # OpenAI-compatible backends have no equivalent to Ollama's local model
+        # registry (and this sync method has no access to the async client), so
+        # skip discovery rather than block startup. Models are still usable via
+        # the `model` field on each request.
+        if inference.backend() == "openai":
+            self.available_models = {}
+            logger.info("INFERENCE_BACKEND=openai: skipping Ollama model discovery")
+            return
         try:
             ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
             response = requests.get(f"{ollama_url}/api/tags")
@@ -241,86 +250,75 @@ class EnhancedLLMService:
                 logger.error(f"RAG retrieval failed: {e}, falling back to original prompt")
                 prompt_to_use = request.message
 
-        # Generate response using Ollama
+        # Generate response using the configured inference backend
         try:
-            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-            ollama_request = {
-                "model": request.model,
-                "prompt": prompt_to_use,  # Use augmented prompt if RAG is enabled
-                "stream": False,
-                "options": {
-                    "temperature": request.temperature,
-                    "num_predict": request.max_tokens
+            text = await inference.generate(
+                _http, request.model, prompt_to_use, request.temperature, request.max_tokens
+            )
+
+            # Analyze conversation history if conversation_id is provided
+            conversation_analysis = None
+            force_reflection = False  # Flag to trigger reflection based on conversation context
+            if request.conversation_id:
+                conversation_analysis = analyze_conversation_history(request.conversation_id)
+                if conversation_analysis.get("session_found"):
+                    # Trigger forced reflection if conversation shows quality issues
+                    quality_score = conversation_analysis.get("quality_score", 1.0)
+                    opportunities = conversation_analysis.get("improvement_opportunities", [])
+
+                    # Force reflection if quality is low or negative feedback detected
+                    if quality_score < 0.7 or any(o.get("type") == "negative_feedback" for o in opportunities):
+                        force_reflection = True
+                        logger.info(f"Conversation analysis triggered enhanced reflection (quality: {quality_score})")
+
+            # Apply Chain-of-Verification reflection and enhancement
+            enhanced_response, reflection_metadata = await self._apply_reflection(
+                text,
+                request.message,
+                conversation_context=conversation_analysis,
+                force_deep_reflection=force_reflection
+            )
+
+            # Store reflection metadata in Redis for learning
+            try:
+                reflection_key = f"localllm:reflection:{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+                reflection_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "model": request.model,
+                    "question": request.message,
+                    "original_response": text,
+                    "final_response": enhanced_response,
+                    **reflection_metadata
                 }
-            }
-            
-            response = await _http.post(f"{ollama_url}/api/generate", json=ollama_request)
-            if response.status_code == 200:
-                data = response.json()
+                redis_client.setex(reflection_key, 60 * 60 * 24 * 7, json.dumps(reflection_data))  # 7 days
 
-                # Analyze conversation history if conversation_id is provided
-                conversation_analysis = None
-                force_reflection = False  # Flag to trigger reflection based on conversation context
-                if request.conversation_id:
-                    conversation_analysis = analyze_conversation_history(request.conversation_id)
-                    if conversation_analysis.get("session_found"):
-                        # Trigger forced reflection if conversation shows quality issues
-                        quality_score = conversation_analysis.get("quality_score", 1.0)
-                        opportunities = conversation_analysis.get("improvement_opportunities", [])
+                # Update aggregated reflection stats
+                if reflection_metadata.get("confidence", 1.0) < 0.7:
+                    redis_client.hincrby(f"localllm:reflection:stats:{request.model}", "low_confidence_count", 1)
+                redis_client.hincrby(f"localllm:reflection:stats:{request.model}", "total_reflections", 1)
+            except Exception as e:
+                logger.error(f"Failed to store reflection metadata: {e}")
 
-                        # Force reflection if quality is low or negative feedback detected
-                        if quality_score < 0.7 or any(o.get("type") == "negative_feedback" for o in opportunities):
-                            force_reflection = True
-                            logger.info(f"Conversation analysis triggered enhanced reflection (quality: {quality_score})")
+            # Cache the response using intelligent caching
+            processing_time = time.time() - start_time
+            self.cache_manager.cache_response(
+                prompt=request.message,
+                model=request.model,
+                response=enhanced_response,
+                processing_time=processing_time,
+                temperature=request.temperature,
+                additional_context=cache_context
+            )
 
-                # Apply Chain-of-Verification reflection and enhancement
-                enhanced_response, reflection_metadata = await self._apply_reflection(
-                    data["response"],
-                    request.message,
-                    conversation_context=conversation_analysis,
-                    force_deep_reflection=force_reflection
-                )
+            # eval_count is no longer exposed by the backend-agnostic generate();
+            # fall back to a word count to preserve the token-usage signal.
+            return ChatResponse(
+                response=enhanced_response,
+                model=request.model,
+                tokens_used=len(text.split()),
+                processing_time=processing_time
+            )
 
-                # Store reflection metadata in Redis for learning
-                try:
-                    reflection_key = f"localllm:reflection:{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-                    reflection_data = {
-                        "timestamp": datetime.now().isoformat(),
-                        "model": request.model,
-                        "question": request.message,
-                        "original_response": data["response"],
-                        "final_response": enhanced_response,
-                        **reflection_metadata
-                    }
-                    redis_client.setex(reflection_key, 60 * 60 * 24 * 7, json.dumps(reflection_data))  # 7 days
-
-                    # Update aggregated reflection stats
-                    if reflection_metadata.get("confidence", 1.0) < 0.7:
-                        redis_client.hincrby(f"localllm:reflection:stats:{request.model}", "low_confidence_count", 1)
-                    redis_client.hincrby(f"localllm:reflection:stats:{request.model}", "total_reflections", 1)
-                except Exception as e:
-                    logger.error(f"Failed to store reflection metadata: {e}")
-
-                # Cache the response using intelligent caching
-                processing_time = time.time() - start_time
-                self.cache_manager.cache_response(
-                    prompt=request.message,
-                    model=request.model,
-                    response=enhanced_response,
-                    processing_time=processing_time,
-                    temperature=request.temperature,
-                    additional_context=cache_context
-                )
-
-                return ChatResponse(
-                    response=enhanced_response,
-                    model=request.model,
-                    tokens_used=data.get("eval_count", 0),
-                    processing_time=processing_time
-                )
-            else:
-                raise HTTPException(status_code=500, detail="Failed to generate response")
-                
         except Exception as e:
             logger.error(f"Chat error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -328,50 +326,23 @@ class EnhancedLLMService:
     async def chat_stream(self, request: ChatRequest):
         """Stream chat responses using Server-Sent Events"""
         try:
-            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-            ollama_request = {
-                "model": request.model,
-                "prompt": request.message,
-                "stream": True,
-                "options": {
-                    "temperature": request.temperature,
-                    "num_predict": request.max_tokens
-                }
-            }
+            full_response = ""
+            async for chunk in inference.stream_tokens(
+                _http, request.model, request.message, request.temperature, request.max_tokens
+            ):
+                full_response += chunk
+                # Send SSE formatted data
+                yield f"data: {json.dumps({'token': chunk, 'done': False})}\n\n"
 
-            # Make streaming request to Ollama
-            async with _http.stream(
-                "POST",
-                f"{ollama_url}/api/generate",
-                json=ollama_request,
-                timeout=120
-            ) as response:
-                if response.status_code == 200:
-                    full_response = ""
-                    async for line in response.aiter_lines():
-                        if line:
-                            try:
-                                chunk = json.loads(line)
-                                if "response" in chunk:
-                                    token = chunk["response"]
-                                    full_response += token
-                                    # Send SSE formatted data
-                                    yield f"data: {json.dumps({'token': token, 'done': chunk.get('done', False)})}\n\n"
-
-                                if chunk.get("done", False):
-                                    # Store conversation history if conversation_id is provided
-                                    if request.conversation_id:
-                                        store_conversation_turn(
-                                            conversation_id=request.conversation_id,
-                                            user_message=request.message,
-                                            ai_response=full_response,
-                                            model=request.model
-                                        )
-                                    break
-                            except json.JSONDecodeError:
-                                continue
-                else:
-                    yield f"data: {json.dumps({'error': 'Failed to generate response', 'done': True})}\n\n"
+            # Terminal event + history persistence (parity with prior done handling)
+            yield f"data: {json.dumps({'token': '', 'done': True})}\n\n"
+            if request.conversation_id:
+                store_conversation_turn(
+                    conversation_id=request.conversation_id,
+                    user_message=request.message,
+                    ai_response=full_response,
+                    model=request.model
+                )
 
         except Exception as e:
             logger.error(f"Stream error: {e}")
@@ -393,8 +364,6 @@ class EnhancedLLMService:
         Returns: (improved_response, reflection_metadata)
         """
         try:
-            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
             # Add conversation insights to metadata
             conversation_insights = {}
             if conversation_context and conversation_context.get("session_found"):
@@ -412,15 +381,9 @@ DRAFT ANSWER: {response}
 
 Generate ONLY the verification questions, one per line, numbered 1-3. Be concise."""
 
-            verify_request = {
-                "model": self.current_model,
-                "prompt": verification_prompt,
-                "stream": False,
-                "options": {"temperature": 0.3}
-            }
-
-            verify_resp = await _http.post(f"{ollama_url}/api/generate", json=verify_request, timeout=30)
-            verification_questions = verify_resp.json().get("response", "").strip() if verify_resp.status_code == 200 else ""
+            verification_questions = (await inference.generate(
+                _http, self.current_model, verification_prompt, temperature=0.3, timeout=30
+            )).strip()
 
             # Step 2: Multi-criteria quality scoring
             scoring_prompt = f"""Score this response on these criteria (0-10 scale):
@@ -436,15 +399,9 @@ Rate each criterion:
 
 Return ONLY 4 numbers separated by commas (e.g., "8,7,9,8")"""
 
-            score_request = {
-                "model": self.current_model,
-                "prompt": scoring_prompt,
-                "stream": False,
-                "options": {"temperature": 0.1}
-            }
-
-            score_resp = await _http.post(f"{ollama_url}/api/generate", json=score_request, timeout=30)
-            scores_text = score_resp.json().get("response", "7,7,7,7").strip() if score_resp.status_code == 200 else "7,7,7,7"
+            scores_text = (await inference.generate(
+                _http, self.current_model, scoring_prompt, temperature=0.1, timeout=30
+            )).strip()
 
             # Parse scores
             try:
@@ -485,17 +442,11 @@ QUALITY SCORES: Accuracy={accuracy_score:.1f}/1.0, Completeness={completeness_sc
 
 Provide an IMPROVED response that addresses the verification questions and quality gaps."""
 
-                improve_request = {
-                    "model": self.current_model,
-                    "prompt": improvement_prompt,
-                    "stream": False
-                }
-
-                improve_resp = await _http.post(f"{ollama_url}/api/generate", json=improve_request, timeout=45)
-                if improve_resp.status_code == 200:
-                    improved_response = improve_resp.json()["response"]
-                    reflection_metadata["improved"] = True
-                    logger.info(f"Response improved via CoVe (confidence: {confidence:.2f})")
+                improved_response = await inference.generate(
+                    _http, self.current_model, improvement_prompt, timeout=45
+                )
+                reflection_metadata["improved"] = True
+                logger.info(f"Response improved via CoVe (confidence: {confidence:.2f})")
 
             return improved_response, reflection_metadata
 
@@ -898,6 +849,8 @@ async def get_learning_insights(api_key: str = Depends(verify_api_key)):
 @app.post("/admin/models/pull")
 async def pull_model(model_name: str, api_key: str = Depends(verify_api_key)):
     """Pull a model from Ollama library"""
+    if inference.backend() == "openai":
+        raise HTTPException(status_code=501, detail="model management not available for openai backend")
     try:
         ollama_url = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
         logger.info(f"Pulling model {model_name} from Ollama at {ollama_url}")
@@ -945,6 +898,8 @@ async def pull_model(model_name: str, api_key: str = Depends(verify_api_key)):
 @app.delete("/admin/models/{model_name}")
 async def delete_model(model_name: str, api_key: str = Depends(verify_api_key)):
     """Delete a model from Ollama"""
+    if inference.backend() == "openai":
+        raise HTTPException(status_code=501, detail="model management not available for openai backend")
     try:
         ollama_url = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
         logger.info(f"Deleting model {model_name} from Ollama at {ollama_url}")
@@ -1059,58 +1014,45 @@ Respond in JSON format:
 """
 
     try:
-        # Call Ollama for analysis
-        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-        response = await _http.post(
-            f"{ollama_url}/api/generate",
-            json={
-                "model": request.model,
-                "prompt": reflection_prompt,
-                "stream": False,
-                "options": {"temperature": 0.3}
-            },
-            timeout=120
+        # Call the configured inference backend for analysis
+        analysis_text = await inference.generate(
+            _http, request.model, reflection_prompt, temperature=0.3, timeout=120
         )
 
-        if response.status_code == 200:
-            analysis_text = response.json()["response"]
+        # Try to parse JSON from response
+        try:
+            # Extract JSON if wrapped in markdown code blocks
+            if "```json" in analysis_text:
+                analysis_text = analysis_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in analysis_text:
+                analysis_text = analysis_text.split("```")[1].split("```")[0].strip()
 
-            # Try to parse JSON from response
-            try:
-                # Extract JSON if wrapped in markdown code blocks
-                if "```json" in analysis_text:
-                    analysis_text = analysis_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in analysis_text:
-                    analysis_text = analysis_text.split("```")[1].split("```")[0].strip()
+            analysis = json.loads(analysis_text)
+            confidence = (
+                float(analysis.get("accuracy", 0.5)) +
+                float(analysis.get("completeness", 0.5)) +
+                float(analysis.get("clarity", 0.5)) +
+                float(analysis.get("helpfulness", 0.5))
+            ) / 4.0
 
-                analysis = json.loads(analysis_text)
-                confidence = (
-                    float(analysis.get("accuracy", 0.5)) +
-                    float(analysis.get("completeness", 0.5)) +
-                    float(analysis.get("clarity", 0.5)) +
-                    float(analysis.get("helpfulness", 0.5))
-                ) / 4.0
-
-                return ReflectResponse(
-                    analysis=analysis,
-                    confidence=confidence,
-                    suggestions=analysis.get("suggestions", []),
-                    improved_response=analysis.get("improved_response", "")
-                )
-            except (json.JSONDecodeError, KeyError) as e:
-                logger.warning(f"Failed to parse reflection JSON: {e}")
-                # Fallback if JSON parsing fails
-                return ReflectResponse(
-                    analysis={
-                        "error": "Could not parse reflection",
-                        "raw_response": analysis_text[:200]
-                    },
-                    confidence=0.5,
-                    suggestions=["Review response manually"],
-                    improved_response=""
-                )
-        else:
-            raise HTTPException(status_code=500, detail=f"Ollama error: {response.status_code}")
+            return ReflectResponse(
+                analysis=analysis,
+                confidence=confidence,
+                suggestions=analysis.get("suggestions", []),
+                improved_response=analysis.get("improved_response", "")
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to parse reflection JSON: {e}")
+            # Fallback if JSON parsing fails
+            return ReflectResponse(
+                analysis={
+                    "error": "Could not parse reflection",
+                    "raw_response": analysis_text[:200]
+                },
+                confidence=0.5,
+                suggestions=["Review response manually"],
+                improved_response=""
+            )
     except Exception as e:
         logger.error(f"Reflection error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Reflection failed: {str(e)}")

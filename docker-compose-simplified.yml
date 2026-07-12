@@ -37,6 +37,11 @@ services:
       - ./logs:/app/logs
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # Inference backend: "ollama" (default) or "openai" for any OpenAI-compatible
+      # endpoint (vLLM, Groq, OpenRouter, Together, ...). Point OPENAI_BASE_URL at it.
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-ollama}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
