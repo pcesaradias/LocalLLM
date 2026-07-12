@@ -119,10 +119,14 @@ backend** (`localllm/inference.py`, `INFERENCE_BACKEND=ollama|openai`). Point
 - or a **hosted API with no local GPU** — Groq (free), OpenRouter, Together,
   Gemini. This is the practical path on machines without an NVIDIA GPU.
 
-Verified live: the openai backend, pointed at Ollama's own `/v1`, works for chat,
-SSE streaming and reflexion — so it works identically against Groq/OpenRouter/vLLM.
-**Remaining:** apply the same `inference.py` abstraction to `langchain-agent`,
-`multimodal-agent`, and `model-manager` (still Ollama-native), and add a vLLM
+Verified live against **Groq** (real hosted API, no GPU): chat, SSE streaming and
+reflexion all work — chat in ~0.24s vs ~4.8s on local Ollama. `langchain-agent`
+(agent LLM via `ChatOpenAI`) and `multimodal-agent` (vision via `inference.generate_vision`)
+are now also backend-switchable; `MODEL_NAME`/`MULTIMODAL_MODEL` are env-overridable
+for provider model ids.
+**Remaining:** the langchain tool classes (`CodeAnalysisTool`, `ResearchTool`) and
+its `/reflect` still call Ollama directly (marked TODO); `model-manager` is Ollama
+model-management (pull/upgrade) and is N/A for the openai backend; add a vLLM
 compose profile for GPU hosts.
 - Ollama vs vLLM benchmark: https://developers.redhat.com/articles/2025/08/08/ollama-vs-vllm-deep-dive-performance-benchmarking
 - Unsloth vLLM/LoRA serving: https://docs.unsloth.ai/basics/inference-and-deployment/vllm-guide

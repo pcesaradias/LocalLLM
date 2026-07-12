@@ -83,6 +83,55 @@ async def generate(http, model: str, prompt: str, temperature: float = 0.7,
     return data["response"]
 
 
+async def generate_vision(http, model: str, prompt: str, image_data: str,
+                          temperature: float = 0.7, max_tokens: Optional[int] = None,
+                          timeout: float = 600.0, mime: str = "image/jpeg") -> str:
+    """Generate a completion from a text prompt + a base64 image, return the text.
+
+    `image_data` is raw base64 (no data: prefix). Raises RuntimeError on non-2xx.
+    """
+    if backend() == "openai":
+        url = f"{_openai_url()}/chat/completions"
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:{mime};base64,{image_data}"}},
+                ],
+            }],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        resp = await http.post(url, json=payload, headers=_openai_headers(), timeout=timeout)
+        if resp.status_code // 100 != 2:
+            raise RuntimeError(
+                f"OpenAI backend generate_vision failed ({resp.status_code}) at {url}: {resp.text}"
+            )
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+    # ollama (default) — native /api/generate with images[]
+    url = f"{_ollama_url()}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "images": [image_data],
+        "stream": False,
+        "options": {"temperature": temperature, "num_predict": max_tokens},
+    }
+    resp = await http.post(url, json=payload, timeout=timeout)
+    if resp.status_code // 100 != 2:
+        raise RuntimeError(
+            f"Ollama backend generate_vision failed ({resp.status_code}) at {url}: {resp.text}"
+        )
+    data = resp.json()
+    return data["response"]
+
+
 async def stream_tokens(http, model: str, prompt: str, temperature: float = 0.7,
                         max_tokens: Optional[int] = None,
                         timeout: float = 600.0) -> AsyncGenerator[str, None]:

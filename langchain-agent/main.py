@@ -8,6 +8,13 @@ import json
 import redis
 import os
 from langchain.llms import Ollama
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError as e:
+    raise ImportError(
+        "langchain-openai is required for INFERENCE_BACKEND=openai. "
+        "Install it: pip install langchain-openai==0.1.7"
+    ) from e
 from langchain.agents import AgentType, initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import LLMChain
@@ -29,6 +36,11 @@ redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:63
 ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 model_manager_url = os.getenv("MODEL_MANAGER_URL", "http://localhost:8005")
 model_name = os.getenv("MODEL_NAME", "qwen3-coder:latest")
+
+# Inference backend selection. Defaults to "ollama" so existing deployments are
+# unaffected; set INFERENCE_BACKEND=openai to point the agent LLM at any
+# OpenAI-compatible endpoint (vLLM/Groq/OpenRouter) via OPENAI_BASE_URL.
+inference_backend = os.getenv("INFERENCE_BACKEND", "ollama")
 
 class ChatRequest(BaseModel):
     message: str
@@ -53,6 +65,7 @@ class ReflectionResponse(BaseModel):
     confidence_score: float
 
 # Custom tools for the agent
+# TODO: still calls Ollama directly via requests; not switched by INFERENCE_BACKEND (follow-up).
 class CodeAnalysisTool(BaseTool):
     name = "code_analyzer"
     description = "Analyzes code for bugs, performance issues, and best practices"
@@ -93,6 +106,7 @@ class CodeAnalysisTool(BaseTool):
     async def _arun(self, code: str) -> str:
         return self._run(code)
 
+# TODO: still calls Ollama directly via requests; not switched by INFERENCE_BACKEND (follow-up).
 class ResearchTool(BaseTool):
     name = "researcher"
     description = "Researches topics and provides detailed information"
@@ -177,12 +191,23 @@ def get_best_model_for_task(task_type: str) -> str:
         logger.warning(f"Error getting model recommendation: {str(e)}, using default: {model_name}")
         return model_name
 
-# Initialize the LLM
-llm = Ollama(
-    base_url=ollama_base_url,
-    model=model_name,
-    temperature=0.7,
-)
+# Initialize the LLM. Ollama remains the default; INFERENCE_BACKEND=openai swaps
+# in ChatOpenAI, which accepts any OpenAI-compatible base_url.
+def _build_llm():
+    if inference_backend.lower() == "openai":
+        return ChatOpenAI(
+            model=model_name,
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0.7,
+        )
+    return Ollama(
+        base_url=ollama_base_url,
+        model=model_name,
+        temperature=0.7,
+    )
+
+llm = _build_llm()
 
 # Build a conversational agent bound to the given per-conversation memory
 def create_agent(memory: ConversationBufferMemory):

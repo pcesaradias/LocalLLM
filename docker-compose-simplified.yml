@@ -142,7 +142,10 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - MULTIMODAL_MODEL=qwen3:latest
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-ollama}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MULTIMODAL_MODEL=${MULTIMODAL_MODEL:-qwen3:latest}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -173,7 +176,10 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:-}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - MODEL_NAME=qwen3-coder:latest
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-ollama}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MODEL_NAME=${MODEL_NAME:-qwen3-coder:latest}
       - LATEST_CODER_MODEL=qwen3-coder:latest
       - MODEL_MANAGER_URL=http://model-manager:8005
     restart: unless-stopped

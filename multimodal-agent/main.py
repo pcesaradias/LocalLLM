@@ -11,6 +11,7 @@ from PIL import Image
 import logging
 
 from internal_auth import require_internal_key
+import inference
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -86,22 +87,12 @@ class ImageAnalysisTool:
             4. Overall context and meaning
             """
 
-            response = await _http.post(
-                f"{ollama_base_url}/api/generate",
-                json={
-                    "model": multimodal_model,
-                    "prompt": multimodal_prompt,
-                    "images": [image_data],
-                    "stream": False,
-                    "options": {"temperature": 0.3}
-                }
+            text = await inference.generate_vision(
+                _http, multimodal_model, multimodal_prompt, image_data,
+                temperature=0.3, timeout=120.0
             )
-            
-            if response.status_code == 200:
-                return response.json().get("response", "Analysis failed")
-            else:
-                return f"Error analyzing image: {response.status_code}"
-                
+            return text
+
         except Exception as e:
             logger.error(f"Image analysis error: {e}")
             return f"Image analysis failed: {str(e)}"
@@ -125,27 +116,16 @@ class CodeGenerationTool:
             3. Any necessary dependencies or setup instructions
             """
             
-            response = await _http.post(
-                f"{ollama_base_url}/api/generate",
-                json={
-                    "model": multimodal_model,
-                    "prompt": prompt,
-                    "images": [image_data],
-                    "stream": False,
-                    "options": {"temperature": 0.5}
-                }
+            generated_code = await inference.generate_vision(
+                _http, multimodal_model, prompt, image_data,
+                temperature=0.5, timeout=120.0
             )
-            
-            if response.status_code == 200:
-                generated_code = response.json().get("response", "")
-                return {
-                    "code": generated_code,
-                    "language": target_language,
-                    "confidence": 0.85
-                }
-            else:
-                return {"error": f"Code generation failed: {response.status_code}"}
-                
+            return {
+                "code": generated_code,
+                "language": target_language,
+                "confidence": 0.85
+            }
+
         except Exception as e:
             logger.error(f"Code generation error: {e}")
             return {"error": f"Code generation failed: {str(e)}"}
@@ -165,27 +145,16 @@ class DocumentParserTool:
             else:  # text_extraction
                 prompt = "Extract all text content from this document. Preserve formatting and structure."
             
-            response = await _http.post(
-                f"{ollama_base_url}/api/generate",
-                json={
-                    "model": multimodal_model,
-                    "prompt": prompt,
-                    "images": [image_data],
-                    "stream": False,
-                    "options": {"temperature": 0.3}
-                }
+            extracted_content = await inference.generate_vision(
+                _http, multimodal_model, prompt, image_data,
+                temperature=0.3, timeout=120.0
             )
-            
-            if response.status_code == 200:
-                extracted_content = response.json().get("response", "")
-                return {
-                    "content": extracted_content,
-                    "analysis_type": analysis_type,
-                    "confidence": 0.8
-                }
-            else:
-                return {"error": f"Document parsing failed: {response.status_code}"}
-                
+            return {
+                "content": extracted_content,
+                "analysis_type": analysis_type,
+                "confidence": 0.8
+            }
+
         except Exception as e:
             logger.error(f"Document parsing error: {e}")
             return {"error": f"Document parsing failed: {str(e)}"}
