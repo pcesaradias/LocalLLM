@@ -84,20 +84,21 @@ check_service() {
     fi
 }
 
+# Only host-published (user-facing) services are checked here. Backend
+# services (vector-db, web-search, model-manager, etc.) run on the internal
+# network and are verified via `docker compose ps` health status instead.
 check_service "LocalLLM" "http://localhost:8080/health"
-check_service "Vector DB" "http://localhost:8007/health"
+check_service "Orchestration" "http://localhost:8003/health"
 check_service "Meta-Orchestrator" "http://localhost:8004/health"
-check_service "Web Search" "http://localhost:8006/health"
-check_service "Model Manager" "http://localhost:8005/health"
 
-# Get API key
-echo "[7/9] Getting API key..."
-API_KEY=$(curl -s http://localhost:8080/admin/current-key 2>/dev/null | grep -o '"current_api_key":"[^"]*"' | cut -d'"' -f4)
-if [ -n "$API_KEY" ]; then
-    echo -e "${GREEN}✓ API Key: $API_KEY${NC}"
-    echo "  Save this key for API requests!"
+# Get API key from the .env file (the key is never exposed over an open endpoint)
+echo "[7/9] Reading API key from .env..."
+API_KEY=$(grep -E '^LOCALLLM_API_KEY=' .env 2>/dev/null | cut -d'=' -f2- | tr -d '"')
+if [ -n "$API_KEY" ] && [ "$API_KEY" != "your_secure_api_key_here" ]; then
+    echo -e "${GREEN}✓ API Key loaded from .env${NC}"
+    echo "  Keep this key secret; it grants full API access."
 else
-    echo -e "${YELLOW}⚠ Could not retrieve API key${NC}"
+    echo -e "${YELLOW}⚠ Set LOCALLLM_API_KEY in .env before using the API${NC}"
 fi
 
 # Test basic chat

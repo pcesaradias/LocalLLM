@@ -1,14 +1,19 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Set working directory
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     jq \
     && rm -rf /var/lib/apt/lists/*
+
+# NOTE: this service still runs as root because it writes to host bind mounts
+# (./models, ./data, ./logs). See RECOMMENDATIONS.md — convert these to named
+# volumes to run non-root. Defense-in-depth (no-new-privileges) is applied in
+# docker-compose-simplified.yml.
 
 # Copy requirements and install Python dependencies
 COPY requirements-simplified.txt .

@@ -1,12 +1,15 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Set working directory
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+# NOTE: runs as root because it writes to host bind mounts
+# (./comparison_results, ./datasets/lora_profiles). See RECOMMENDATIONS.md.
 
 # Copy requirements
 COPY requirements.txt .
