@@ -64,7 +64,8 @@ async def generate(http, model: str, prompt: str, temperature: float = 0.7,
                 f"OpenAI backend generate failed ({resp.status_code}) at {url}: {resp.text}"
             )
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        return msg.get("content") or ""
 
     # ollama (default)
     url = f"{_ollama_url()}/api/generate"
@@ -112,7 +113,8 @@ async def generate_vision(http, model: str, prompt: str, image_data: str,
                 f"OpenAI backend generate_vision failed ({resp.status_code}) at {url}: {resp.text}"
             )
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        return msg.get("content") or ""
 
     # ollama (default) — native /api/generate with images[]
     url = f"{_ollama_url()}/api/generate"
