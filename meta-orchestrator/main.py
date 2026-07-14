@@ -99,6 +99,10 @@ SERVICES = {
     }
 }
 
+# Default model for chat requests routed to backend services; must exist in the
+# configured inference backend (e.g. pulled in Ollama) or every chat will 500
+DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "qwen3:latest")
+
 # LoRA Profile Specialization System
 LORA_PROFILE_MODELS = {
     # Coding Profiles
@@ -470,7 +474,7 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
             chat_request = {
                 "message": request.message,
                 "conversation_id": session_id,
-                "model": "qwen3:latest",
+                "model": DEFAULT_CHAT_MODEL,
                 "context": request.context or {}
             }
             headers = {}
@@ -546,7 +550,7 @@ async def _fallback_to_localllm(request: MetaRequest, session_id: str, start_tim
         chat_request = {
             "message": request.message,
             "conversation_id": session_id,
-            "model": "qwen3:latest",
+            "model": DEFAULT_CHAT_MODEL,
             "context": request.context or {}
         }
         api_key = os.getenv("LOCALLLM_API_KEY")
