@@ -333,89 +333,9 @@ class TaskClassifier:
 
         return capability_map.get(task_type, ["general_chat"])
 
-class ModelManagerIntegration:
-    """Integration with model manager for intelligent model selection"""
-    
-    def __init__(self):
-        self.model_manager_url = SERVICES["model-manager"]["url"]
-    
-    async def get_recommended_model(self, task_type: str, context: str = "") -> Dict[str, Any]:
-        """Get recommended model from model manager"""
-        try:
-            response = await service_circuit_breakers["model-manager"].call_async(
-                _http.get,
-                f"{self.model_manager_url}/recommend-model",
-                params={"task_type": task_type, "context": context},
-                headers=internal_headers(),
-                timeout=10
-            )
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"Model manager returned status {response.status_code}")
-                return self._get_fallback_model(task_type)
-        except Exception as e:
-            logger.error(f"Error calling model manager: {str(e)}")
-            return self._get_fallback_model(task_type)
-    
-    def _get_fallback_model(self, task_type: str) -> Dict[str, Any]:
-        """Fallback model selection when model manager is unavailable"""
-        fallback_map = {
-            "coding": {"model_type": "coder", "model_name": "qwen2.5-coder:7b"},
-            "programming": {"model_type": "coder", "model_name": "qwen2.5-coder:7b"},
-            "multimodal": {"model_type": "multimodal", "model_name": "qwen2.5-vl:7b"},
-            "vision": {"model_type": "multimodal", "model_name": "qwen2.5-vl:7b"},
-            "reasoning": {"model_type": "deepseek-r1", "model_name": "deepseek-r1:7b"},
-            "mathematics": {"model_type": "deepseek-r1", "model_name": "deepseek-r1:7b"},
-            "general": {"model_type": "general", "model_name": "qwen2.5:7b"},
-            "chat": {"model_type": "general", "model_name": "qwen2.5:7b"}
-        }
-        
-        task_lower = task_type.lower()
-        for key, model in fallback_map.items():
-            if key in task_lower:
-                return {
-                    "task_type": task_type,
-                    "recommended_model_type": model["model_type"],
-                    "recommended_model": model["model_name"],
-                    "score": 0.7,
-                    "description": f"Fallback model for {task_type}",
-                    "reasoning": "Using fallback model selection",
-                    "reflection_enabled": False
-                }
-        
-        return {
-            "task_type": task_type,
-            "recommended_model_type": "general",
-            "recommended_model": "qwen2.5:7b",
-            "score": 0.5,
-            "description": "General fallback model",
-            "reasoning": "Using general fallback model",
-            "reflection_enabled": False
-        }
-    
-    async def analyze_model_performance(self, model_type: str, task_results: str = "") -> Dict[str, Any]:
-        """Analyze model performance using reflection"""
-        try:
-            response = await service_circuit_breakers["model-manager"].call_async(
-                _http.get,
-                f"{self.model_manager_url}/models/reflection/analyze-performance",
-                params={"model_type": model_type, "task_results": task_results},
-                headers=internal_headers(),
-                timeout=10
-            )
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {"error": "Model manager reflection unavailable"}
-        except Exception as e:
-            logger.error(f"Error calling model reflection: {str(e)}")
-            return {"error": str(e)}
-
 # Initialize systems
 learning_system = LearningSystem()
 task_classifier = TaskClassifier()
-model_manager = ModelManagerIntegration()
 
 # Initialize circuit breakers for each service
 service_circuit_breakers = {
