@@ -8,7 +8,6 @@ from error_handling import (
 from cline_utils import ClinePromptParser
 from internal_auth import internal_headers
 from typing import Dict, Any, List, Optional, TypedDict
-import requests
 import httpx
 import json
 import redis
@@ -339,7 +338,8 @@ class ModelManagerIntegration:
     async def get_recommended_model(self, task_type: str, context: str = "") -> Dict[str, Any]:
         """Get recommended model from model manager"""
         try:
-            response = await _http.get(
+            response = await service_circuit_breakers["model-manager"].call_async(
+                _http.get,
                 f"{self.model_manager_url}/recommend-model",
                 params={"task_type": task_type, "context": context},
                 headers=internal_headers(),
@@ -393,7 +393,8 @@ class ModelManagerIntegration:
     async def analyze_model_performance(self, model_type: str, task_results: str = "") -> Dict[str, Any]:
         """Analyze model performance using reflection"""
         try:
-            response = await _http.get(
+            response = await service_circuit_breakers["model-manager"].call_async(
+                _http.get,
                 f"{self.model_manager_url}/models/reflection/analyze-performance",
                 params={"model_type": model_type, "task_results": task_results},
                 headers=internal_headers(),
@@ -417,7 +418,7 @@ service_circuit_breakers = {
     service_name: CircuitBreaker(
         failure_threshold=5,
         recovery_timeout=30,
-        expected_exception=requests.exceptions.RequestException
+        expected_exception=httpx.HTTPError
     )
     for service_name in SERVICES.keys()
 }
@@ -457,7 +458,8 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
                 },
                 "requirements": request.preferences or {}
             }
-            response = await _http.post(
+            response = await service_circuit_breakers[best_service].call_async(
+                _http.post,
                 f"{service_info['url']}/execute-workflow",
                 json=workflow_request,
                 headers=internal_headers(),
@@ -482,7 +484,8 @@ async def intelligent_chat(request: MetaRequest, auth: dict = Depends(verify_cha
                 # Internal service-to-service auth for backend services
                 headers.update(internal_headers())
 
-            response = await _http.post(
+            response = await service_circuit_breakers[best_service].call_async(
+                _http.post,
                 f"{service_info['url']}/chat",
                 json=chat_request,
                 headers=headers,
@@ -551,7 +554,8 @@ async def _fallback_to_localllm(request: MetaRequest, session_id: str, start_tim
             raise HTTPException(status_code=500, detail="LOCALLLM_API_KEY not configured")
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        response = await _http.post(
+        response = await service_circuit_breakers["localllm"].call_async(
+            _http.post,
             f"{SERVICES['localllm']['url']}/chat",
             json=chat_request,
             headers=headers,

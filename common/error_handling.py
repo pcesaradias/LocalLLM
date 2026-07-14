@@ -65,8 +65,8 @@ class CircuitBreaker:
         self.last_failure_time = None
         self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
 
-    def call(self, func: Callable, *args, **kwargs):
-        """Execute function with circuit breaker protection"""
+    def _pre_call(self):
+        """Reject immediately if OPEN, transition to HALF_OPEN after recovery timeout"""
         if self.state == "OPEN":
             if time.time() - self.last_failure_time >= self.recovery_timeout:
                 logger.info(f"Circuit breaker entering HALF_OPEN state")
@@ -81,8 +81,24 @@ class CircuitBreaker:
                     }
                 )
 
+    def call(self, func: Callable, *args, **kwargs):
+        """Execute function with circuit breaker protection"""
+        self._pre_call()
+
         try:
             result = func(*args, **kwargs)
+            self._on_success()
+            return result
+        except self.expected_exception as e:
+            self._on_failure()
+            raise
+
+    async def call_async(self, func: Callable, *args, **kwargs):
+        """Execute async function with circuit breaker protection"""
+        self._pre_call()
+
+        try:
+            result = await func(*args, **kwargs)
             self._on_success()
             return result
         except self.expected_exception as e:
