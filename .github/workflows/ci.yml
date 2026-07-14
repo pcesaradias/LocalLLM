@@ -32,6 +32,9 @@ jobs:
             model-improvement-service/automatic_tester.py \
             internal_auth.py $(ls */internal_auth.py) $(ls */inference.py)
 
+      - name: Check vendored shared modules match common/
+        run: python scripts/check_vendored_common.py
+
       - name: Install test deps
         run: pip install -r tests/requirements-test.txt
 

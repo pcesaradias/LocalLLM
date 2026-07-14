@@ -68,13 +68,13 @@ class ClinePromptParser:
             # Not a Cline prompt, return as-is
             return message
 
-        logger.info("Detected Cline prompt, extracting user query...")
+        logger.info("Detected Cline prompt, extracting user query [PRIVACY: details not logged]")
 
         # Strategy 1: Extract from <task> tag
         task_match = re.search(r'<task>(.*?)</task>', message, re.DOTALL)
         if task_match:
             query = task_match.group(1).strip()
-            logger.info(f"Extracted query from <task> tag: {query[:100]}...")
+            logger.info(f"Extracted query from <task> tag [length: {len(query)} chars]")
             return query
 
         # Strategy 2: Look for user message after system context
@@ -95,7 +95,7 @@ class ClinePromptParser:
             potential_query = re.sub(r'<[^>]+>', '', potential_query).strip()
 
             if potential_query and len(potential_query) > 10:
-                logger.info(f"Extracted query after tags: {potential_query[:100]}...")
+                logger.info(f"Extracted query after tags [length: {len(potential_query)} chars]")
                 return potential_query
 
         # Strategy 3: Extract first significant line that's not a tag
@@ -121,7 +121,7 @@ class ClinePromptParser:
 
             # This looks like user content
             if len(line) > 10:
-                logger.info(f"Extracted first content line: {line[:100]}...")
+                logger.info(f"Extracted first content line [length: {len(line)} chars]")
                 return line
 
         # Fallback: return first 200 chars (avoid huge prompts)
